@@ -1,0 +1,165 @@
+diff --git a/app/AndroidManifest.xml b/app/AndroidManifest.xml
+index c2b636f..331f062 100755
+--- a/app/AndroidManifest.xml
++++ b/app/AndroidManifest.xml
+@@ -20,6 +20,10 @@
+       android:name="oculus.software.handtracking"
+       android:required="false"
+       />
++  <uses-feature
++      android:name="com.oculus.feature.PASSTHROUGH"
++      android:required="true"
++      />
+   <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+   <application
+       android:allowBackup="false"
+diff --git a/app/src/Remotes.h b/app/src/Remotes.h
+index 21e15eb..30423f3 100644
+--- a/app/src/Remotes.h
++++ b/app/src/Remotes.h
+@@ -18,6 +18,7 @@ struct RemoteState {
+     bool buttonY = false;
+     OVR::Matrix4f LeftRemoteTransform;
+     OVR::Matrix4f RightRemoteTransform;
++    OVR::Matrix4f HeadTransform;
+ };
+ 
+ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatrix) {
+@@ -29,6 +30,12 @@ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatr
+ 
+ std::string remotes_to_string(const RemoteState& state_, const OVRFW::ovrApplFrameIn& frame_) {
+         std::string text;
++        // head pose in the app's local space, so clients can recover world-frame controller poses
++        text += "h:";
++        text += TransformationMatrixToString(state_.HeadTransform);
++        if (frame_.RightRemoteTracked || frame_.LeftRemoteTracked) {
++            text += "|";
++        }
+         // right hand
+         bool both_tracked = frame_.RightRemoteTracked && frame_.LeftRemoteTracked;
+         if (frame_.RightRemoteTracked) {
+diff --git a/app/src/main.cpp b/app/src/main.cpp
+index e934c1e..31e847c 100755
+--- a/app/src/main.cpp
++++ b/app/src/main.cpp
+@@ -56,9 +56,20 @@ PFN_xrGetDeviceSampleRateFB xrGetDeviceSampleRateFB = nullptr;
+ #include "Remotes.h"
+ 
+ class OculusTeleopApp : public OVRFW::XrApp {
++   private:
++    XrPassthroughFB passthrough_ = XR_NULL_HANDLE;
++    XrPassthroughLayerFB passthroughLayer_ = XR_NULL_HANDLE;
++    PFN_xrCreatePassthroughFB pfnCreatePassthrough_ = nullptr;
++    PFN_xrDestroyPassthroughFB pfnDestroyPassthrough_ = nullptr;
++    PFN_xrPassthroughStartFB pfnPassthroughStart_ = nullptr;
++    PFN_xrCreatePassthroughLayerFB pfnCreatePassthroughLayer_ = nullptr;
++    PFN_xrDestroyPassthroughLayerFB pfnDestroyPassthroughLayer_ = nullptr;
++    PFN_xrPassthroughLayerResumeFB pfnPassthroughLayerResume_ = nullptr;
++
+    public:
+     OculusTeleopApp() : OVRFW::XrApp() {
+-        BackgroundColor = OVR::Vector4f(0.60f, 0.95f, 0.4f, 1.0f);
++        // Fully transparent, so the passthrough layer shows behind the scene.
++        BackgroundColor = OVR::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
+         OpenXRVersion = XR_API_VERSION_1_1;
+     }
+ 
+@@ -103,6 +114,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+         std::vector<const char*> extensions = XrApp::GetExtensions();
+         extensions.push_back(XR_FB_HAPTIC_AMPLITUDE_ENVELOPE_EXTENSION_NAME);
+         extensions.push_back(XR_FB_HAPTIC_PCM_EXTENSION_NAME);
++        extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+                 return extensions;
+     }
+ 
+@@ -784,6 +796,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+     virtual bool SessionInit() override {
+         /// Use LocalSpace instead of Stage Space.
+         CurrentSpace = LocalSpace;
++        InitPassthrough();
+         /// Init session bound objects
+         if (false == controllerRenderL_.Init(true)) {
+             ALOG("AppInit::Init L controller renderer FAILED.");
+@@ -801,7 +814,53 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+         return true;
+     }
+ 
++    void InitPassthrough() {
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrCreatePassthroughFB", (PFN_xrVoidFunction*)&pfnCreatePassthrough_));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrDestroyPassthroughFB", (PFN_xrVoidFunction*)&pfnDestroyPassthrough_));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrPassthroughStartFB", (PFN_xrVoidFunction*)&pfnPassthroughStart_));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrCreatePassthroughLayerFB", (PFN_xrVoidFunction*)&pfnCreatePassthroughLayer_));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrDestroyPassthroughLayerFB", (PFN_xrVoidFunction*)&pfnDestroyPassthroughLayer_));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrPassthroughLayerResumeFB", (PFN_xrVoidFunction*)&pfnPassthroughLayerResume_));
++        if (!pfnCreatePassthrough_ || !pfnCreatePassthroughLayer_ || !pfnPassthroughStart_ || !pfnPassthroughLayerResume_) {
++            ALOG("Passthrough functions unavailable");
++            return;
++        }
++        XrPassthroughCreateInfoFB ptci = {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
++        if (XR_FAILED(pfnCreatePassthrough_(GetSession(), &ptci, &passthrough_))) {
++            ALOG("xrCreatePassthroughFB failed");
++            return;
++        }
++        XrPassthroughLayerCreateInfoFB plci = {XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
++        plci.passthrough = passthrough_;
++        plci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
++        if (XR_FAILED(pfnCreatePassthroughLayer_(GetSession(), &plci, &passthroughLayer_))) {
++            ALOG("xrCreatePassthroughLayerFB failed");
++            return;
++        }
++        OXR(pfnPassthroughStart_(passthrough_));
++        OXR(pfnPassthroughLayerResume_(passthroughLayer_));
++    }
++
++    void PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) override {
++        if (passthroughLayer_ == XR_NULL_HANDLE) {
++            return;
++        }
++        XrCompositionLayerPassthroughFB layer = {XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
++        layer.layerHandle = passthroughLayer_;
++        layer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
++        layer.space = XR_NULL_HANDLE;
++        layers[layerCount++].Passthrough = layer;
++    }
++
+     virtual void SessionEnd() override {
++        if (passthroughLayer_ != XR_NULL_HANDLE) {
++            OXR(pfnDestroyPassthroughLayer_(passthroughLayer_));
++            passthroughLayer_ = XR_NULL_HANDLE;
++        }
++        if (passthrough_ != XR_NULL_HANDLE) {
++            OXR(pfnDestroyPassthrough_(passthrough_));
++            passthrough_ = XR_NULL_HANDLE;
++        }
+         controllerRenderL_.Shutdown();
+         controllerRenderR_.Shutdown();
+         beamRenderer_.Shutdown();
+@@ -1099,7 +1158,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+         bool bB = buttonB.currentState == XR_TRUE;
+         bool bX = buttonX.currentState == XR_TRUE;
+         bool bY = buttonY.currentState == XR_TRUE;
+-        RemoteState remoteState{triggerTouchL_, triggerTouchR_, bA, bB, bX, bY, LeftRemoteTransform, RightRemoteTransform};
++        RemoteState remoteState{triggerTouchL_, triggerTouchR_, bA, bB, bX, bY, LeftRemoteTransform, RightRemoteTransform, headPoseMatrix};
+         auto remotes_str = remotes_to_string(remoteState, in);
+         __android_log_print(ANDROID_LOG_INFO, "wE9ryARX", "%s",
+                             remotes_str.c_str());
+@@ -1117,8 +1176,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+ 
+     // Render eye buffers while running
+     virtual void Render(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override {
+-        /// Render UI
+-        ui_.Render(in, out);
++        // The debug panel and beams are not drawn: they would block the operator's view of the robot.
+         /// Render controllers
+         if (in.LeftRemoteTracked) {
+             controllerRenderL_.Render(out.Surfaces);
+@@ -1126,9 +1184,6 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+         if (in.RightRemoteTracked) {
+             controllerRenderR_.Render(out.Surfaces);
+         }
+-
+-        /// Render beams
+-        beamRenderer_.Render(in, out);
+     }
+ 
+     void EnumerateActions() {

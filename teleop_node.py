@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Quest 3 controller teleop for the UR5e through the running ur_robot_driver.
+
+Dry-run is the default: it computes motion but sends nothing to the arm or gripper.
+This node never switches controllers. Activate forward_position_controller yourself.
+
+Controls (right controller): hold grip = move, trigger = gripper,
+and with the grip released: stick = fine sideways motion, A/B = fine in/out, in the tool's own frame.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import threading
+import time
+
+import numpy as np
+import rclpy
+from control_msgs.action import GripperCommand
+from controller_manager_msgs.srv import ListControllers
+from geometry_msgs.msg import PoseStamped, WrenchStamped
+from rcl_interfaces.srv import GetParameters
+from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Float64, Float64MultiArray, String
+from ur_dashboard_msgs.msg import RobotMode, SafetyMode
+
+from quest_link import DEFAULT_PORT, NO_JOG, UdpSource, quest_sample
+from core import JOINT_NAMES, Limits, Mapping, TeleopCore, jog_velocity
+
+ROBOT_RUNNING, SAFETY_NORMAL = 7, 1
+JOINT_STALE_S = 0.05
+QUEST_STALE_S = 0.25
+MAX_TRACKING_ERROR = 0.10   # rad between commanded and measured joints
+CONTROLLER = "forward_position_controller"
+TRIGGER_START = 0.05        # trigger depth that first wakes the gripper
+GRIP_PERIOD_S = 0.1         # shortest time between gripper goals
+GRIP_GOAL_TIMEOUT_S = 6.0   # the server gives up on a move after 5 s
+
+
+class QuestSource:
+    def __init__(self, ip: str | None):
+        from oculus_reader.reader import OculusReader
+        self._reader = OculusReader(ip_address=ip)
+        self._last, self._changed = None, 0.0
+
+    def read(self):
+        """Return (pose or None, clutch, trigger, head, jog). Identical poses mean a frozen stream."""
+        transforms, buttons = self._reader.get_transformations_and_buttons()
+        pose, clutch, trigger, head, jog = quest_sample(transforms or {}, buttons or {})
+        now = time.monotonic()
+        if pose is not None and (self._last is None or not np.array_equal(pose, self._last)):
+            self._last, self._changed = pose.copy(), now
+        if pose is None or now - self._changed > QUEST_STALE_S:
+            pose = None
+        return pose, clutch, trigger, head, jog
+
+
+class FakeSource:
+    """Scripted motion for testing without a headset: hold, move, release, re-grip."""
+
+    def __init__(self, amplitude: float = 0.03, jog: bool = False):
+        self._t0 = time.monotonic()
+        self._amplitude = amplitude
+        self._jog = jog
+
+    def read(self):
+        t = time.monotonic() - self._t0
+        pose = np.eye(4)
+        pose[:3, 3] = [self._amplitude * math.sin(t), 0.0, 0.0]
+        if self._jog:
+            # Grip released throughout: stick, then a neutral gap, then the in/out button.
+            phase = t % 8.0
+            jog = (1.0, 0.0, 0.0) if phase < 3.0 else (0.0, 0.0, 1.0) if 4.0 < phase < 6.0 else NO_JOG
+            return pose, False, 0.0, np.eye(4), jog
+        return pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG
+
+
+class TeleopNode(Node):
+    def __init__(self, args, source):
+        super().__init__("quest_teleop")
+        self.args, self.source = args, source
+        self.lock = threading.Lock()
+        self.q_actual = None
+        self.joint_time = 0.0
+        self.robot_mode = self.safety_mode = None
+        self.speed_scaling = None
+        self.force = None
+        self.force_baseline = None
+        self.core = None
+        self.fault = None
+        self.was_moving = False
+        self.jog_v = None
+        self.grip_pos = None      # commanded jaw position, moved gradually toward the trigger
+        self.last_grip_sent = None
+        self.last_grip_time = 0.0
+        self.grip_busy_since = None
+        self.grip_warned = False
+        self.last_log = 0.0
+        self.mapping = Mapping(
+            robot_forward_yaw=math.radians(args.robot_forward_yaw_deg),
+            position_scale=args.position_scale,
+            rotation_scale=args.rotation_scale,
+            tcp_offset=_z_offset(args.tcp_z),
+        )
+        self.limits = Limits(
+            max_linear_speed=args.max_linear_speed,
+            max_angular_speed=args.max_angular_speed,
+            max_joint_speed=args.max_joint_speed,
+            box_half_extent=args.box_half_extent,
+            min_z=args.min_z,
+        )
+
+        self.create_subscription(JointState, "/joint_states", self._on_joints, qos_profile_sensor_data)
+        # The driver publishes these only on change, so a late subscriber needs the latched value.
+        latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(RobotMode, "/io_and_status_controller/robot_mode", self._on_robot_mode, latched)
+        self.create_subscription(SafetyMode, "/io_and_status_controller/safety_mode", self._on_safety_mode, latched)
+        self.create_subscription(Float64, "/speed_scaling_state_broadcaster/speed_scaling", self._on_scaling, 10)
+        self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._on_wrench, qos_profile_sensor_data)
+
+        self.cmd_pub = self.create_publisher(Float64MultiArray, f"/{CONTROLLER}/commands", 1) if args.live else None
+        self.target_pub = self.create_publisher(PoseStamped, "/teleop/target_pose", 10)
+        self.engaged_pub = self.create_publisher(Bool, "/teleop/engaged", 10)
+        self.status_pub = self.create_publisher(String, "/teleop/status", 10)
+        self.grip_cmd_pub = self.create_publisher(Float64, "/teleop/gripper_command", 10)
+        self.grip_pos_pub = self.create_publisher(Float64, "/teleop/gripper_position", 10)
+        self.grip_client = ActionClient(self, GripperCommand, "/gripper/gripper_cmd") if args.live else None
+
+        self.timer = self.create_timer(1.0 / args.rate, self._tick)
+
+    def _on_joints(self, msg: JointState) -> None:
+        # The driver publishes joints out of kinematic order: always map by name.
+        index = {n: i for i, n in enumerate(msg.name)}
+        if not all(n in index for n in JOINT_NAMES):
+            return
+        with self.lock:
+            self.q_actual = np.array([msg.position[index[n]] for n in JOINT_NAMES])
+            self.joint_time = time.monotonic()
+
+    def _on_robot_mode(self, msg): self.robot_mode = msg.mode
+    def _on_safety_mode(self, msg): self.safety_mode = msg.mode
+    def _on_scaling(self, msg): self.speed_scaling = msg.data
+
+    def _on_wrench(self, msg):
+        f = msg.wrench.force
+        self.force = np.array([f.x, f.y, f.z])
+
+    def _gate(self, q_actual) -> str | None:
+        """Return why motion must stop, or None. Checked on every tick while live."""
+        if time.monotonic() - self.joint_time > JOINT_STALE_S:
+            return "joint states stale"
+        if self.robot_mode != ROBOT_RUNNING:
+            return f"robot mode {self.robot_mode}"
+        if self.safety_mode != SAFETY_NORMAL:
+            return f"safety mode {self.safety_mode}"
+        if not self.speed_scaling:
+            return "speed scaling is 0: program paused or not running"
+        if np.max(np.abs(self.core.q_cmd - q_actual)) > MAX_TRACKING_ERROR:
+            return "commanded joints too far from measured joints"
+        if self.force is not None:
+            # Absolute check too: re-gripping re-baselines, which must not excuse a hard press.
+            if np.linalg.norm(self.force) > self.args.max_force_abs:
+                return "absolute force limit exceeded"
+            if self.force_baseline is not None and np.linalg.norm(self.force - self.force_baseline) > self.args.max_force_delta:
+                return "contact force limit exceeded"
+        return None
+
+    def _tick(self) -> None:
+        with self.lock:
+            q_actual, have = (None, False) if self.q_actual is None else (self.q_actual.copy(), True)
+        if not have:
+            return
+        if self.core is None:
+            self.core = TeleopCore(q_actual, self.mapping, self.limits)
+            self.get_logger().info("Initialized from measured joints")
+
+        pose, clutch, trigger, head, jog = self.source.read()
+
+        # The stick works only with the grip released and a live, tracked controller.
+        jog_v = jog_velocity(jog, self.args.jog_speed) if pose is not None and not clutch else np.zeros(3)
+        jogging = bool(np.any(jog_v))
+        self.jog_v = jog_v if jogging else None
+
+        if self.args.live:
+            reason = self._gate(q_actual)
+            if reason or self.fault:
+                if reason and reason != self.fault:
+                    self.get_logger().error(f"HOLD: {reason}.{self._readout()} Release the grip and stick to clear.")
+                # As with re-gripping: letting go first stops a held stick pushing on after a hold.
+                self.fault = reason or (self.fault if clutch or jogging else None)
+                self.jog_v = None
+                self.core.resync(q_actual)
+                self.force_baseline = None
+                self.was_moving = False
+                self._publish_state(False, self.fault or "fault")
+                return
+
+        dt = 1.0 / self.args.rate
+        q_cmd = self.core.jog(jog_v, dt) if jogging else self.core.update(pose, clutch, dt, head)
+
+        moving = self.core.engaged or jogging
+        if moving and not self.was_moving:
+            self.force_baseline = None if self.force is None else self.force.copy()
+        if not moving:
+            self.force_baseline = None
+        self.was_moving = moving
+
+        if self.cmd_pub is not None:
+            self.cmd_pub.publish(Float64MultiArray(data=[float(v) for v in q_cmd]))
+        self._send_gripper(trigger)
+        self._publish_state(moving, self.core.status)
+
+    def _send_gripper(self, trigger: float | None) -> None:
+        opened, closed = self.args.gripper_open, self.args.gripper_closed
+        if trigger is None or opened is None or closed is None:
+            return
+        if self.grip_pos is None:
+            # The server reports no position, so leave the gripper alone until the trigger is
+            # first pulled: commanding "open" at startup would drop anything it is holding.
+            if trigger < TRIGGER_START:
+                return
+            self.grip_pos = opened
+        # Trigger depth sets the position; the speed limit makes a hard squeeze close gradually.
+        want = opened + trigger * (closed - opened)
+        step = self.args.gripper_speed / self.args.rate
+        delta = want - self.grip_pos
+        self.grip_pos = want if abs(delta) <= step else self.grip_pos + math.copysign(step, delta)
+
+        pos = self.grip_pos
+        now = time.monotonic()
+        if now - self.last_grip_time < GRIP_PERIOD_S:
+            return
+        if self.last_grip_sent is not None:
+            moved = abs(pos - self.last_grip_sent)
+            if moved == 0.0 or (moved < 0.01 * abs(closed - opened) and pos != want):
+                return
+        # The server runs one blocking move at a time, so goals sent faster than it finishes
+        # would queue up and the gripper would lag behind the trigger.
+        if self.grip_busy_since is not None and now - self.grip_busy_since < GRIP_GOAL_TIMEOUT_S:
+            return
+        self.last_grip_sent, self.last_grip_time = pos, now
+        self.grip_cmd_pub.publish(Float64(data=pos))
+        if self.grip_client is None:
+            return
+        if not self.grip_client.server_is_ready():
+            if not self.grip_warned:
+                self.grip_warned = True
+                self.get_logger().warning("Gripper server not available: gripper commands are not reaching it")
+            return
+        goal = GripperCommand.Goal()
+        goal.command.position = pos
+        goal.command.max_effort = self.args.gripper_effort
+        self.grip_busy_since = now
+        self.grip_client.send_goal_async(goal).add_done_callback(self._on_grip_accepted)
+
+    def _on_grip_accepted(self, future) -> None:
+        handle = future.result()
+        if handle.accepted:
+            handle.get_result_async().add_done_callback(self._on_grip_result)
+        else:
+            self.grip_busy_since = None
+
+    def _on_grip_result(self, future) -> None:
+        self.grip_pos_pub.publish(Float64(data=future.result().result.position))
+        self.grip_busy_since = None
+
+    def _readout(self) -> str:
+        """Force and gripper values for the log, to compare against the limits."""
+        out = ""
+        if self.jog_v is not None:
+            x, y, z = self.jog_v * 1000
+            out += f" tool mm/s: x={x:+.1f} y={y:+.1f} z={z:+.1f}"
+        if self.force is not None:
+            out += f" force={np.linalg.norm(self.force):.0f}N"
+            if self.force_baseline is not None:
+                out += f" change={np.linalg.norm(self.force - self.force_baseline):.0f}N"
+        if self.grip_pos is not None:
+            out += f" gripper={self.grip_pos * 1000:.0f}mm"
+        return out
+
+    def _publish_state(self, engaged: bool, status: str) -> None:
+        self.engaged_pub.publish(Bool(data=bool(engaged)))
+        self.status_pub.publish(String(data=status))
+        T = self.core.target
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base"
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = [float(v) for v in T[:3, 3]]
+        msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = _quat(T[:3, :3])
+        self.target_pub.publish(msg)
+        now = time.monotonic()
+        if now - self.last_log > 1.0:
+            self.last_log = now
+            mode = "LIVE" if self.args.live else "DRY-RUN"
+            if self.core.engaged:
+                f, l, u = self.core.grip_motion()
+                self.get_logger().info(f"[{mode}] {status} | since grip (m): forward={f:+.3f} left={l:+.3f} up={u:+.3f} |{self._readout()}")
+            else:
+                self.get_logger().info(f"[{mode}] {status} |{self._readout()}")
+
+
+def _z_offset(z: float) -> np.ndarray:
+    T = np.eye(4)
+    T[2, 3] = z
+    return T
+
+
+def _quat(R: np.ndarray):
+    w = math.sqrt(max(0.0, 1 + R[0, 0] + R[1, 1] + R[2, 2])) / 2
+    x = math.copysign(math.sqrt(max(0.0, 1 + R[0, 0] - R[1, 1] - R[2, 2])) / 2, R[2, 1] - R[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1 - R[0, 0] + R[1, 1] - R[2, 2])) / 2, R[0, 2] - R[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1 - R[0, 0] - R[1, 1] + R[2, 2])) / 2, R[1, 0] - R[0, 1])
+    return float(x), float(y), float(z), float(w)
+
+
+def preflight(node: TeleopNode, timeout: float = 5.0) -> str | None:
+    """Read-only checks before going live. Returns an error string, or None if OK."""
+    lc = node.create_client(ListControllers, "/controller_manager/list_controllers")
+    if not lc.wait_for_service(timeout_sec=timeout):
+        return "controller_manager is not reachable"
+    fut = lc.call_async(ListControllers.Request())
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if not fut.done():
+        return "list_controllers timed out"
+    states = {c.name: c.state for c in fut.result().controller}
+    if states.get(CONTROLLER) != "active":
+        active = [n for n, s in states.items() if s == "active" and "broadcaster" not in n]
+        return f"{CONTROLLER} is {states.get(CONTROLLER, 'missing')}; active: {active}. Switch it deliberately, after checking nobody else is using the arm."
+
+    gp = node.create_client(GetParameters, f"/{CONTROLLER}/get_parameters")
+    if not gp.wait_for_service(timeout_sec=timeout):
+        return f"{CONTROLLER} parameters are not reachable"
+    fut = gp.call_async(GetParameters.Request(names=["joints"]))
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if not fut.done() or not fut.result().values:
+        return "could not read the controller's joint order"
+    joints = tuple(fut.result().values[0].string_array_value)
+    if joints != JOINT_NAMES:
+        return f"unexpected controller joint order: {joints}"
+    return None
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--live", action="store_true", help="Actually command the arm and gripper")
+    p.add_argument("--fake-source", action="store_true", help="Scripted motion instead of a Quest")
+    p.add_argument("--fake-amplitude", type=float, default=0.03)
+    p.add_argument("--fake-jog", action="store_true", help="Scripted source uses the stick and buttons instead of the grip")
+    p.add_argument("--quest-ip", default=None, help="Quest IP for wireless adb; USB if omitted")
+    p.add_argument("--udp-bind", default=None, help="coral's Tailscale IP: receive from quest_sender.py")
+    p.add_argument("--udp-from", default=None, help="The only IP allowed to send (your Mac's Tailscale IP)")
+    p.add_argument("--udp-port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--rate", type=float, default=125.0)
+    p.add_argument("--robot-forward-yaw-deg", type=float, default=0.0, help="Robot's forward direction, degrees from base +x. Set once for the setup.")
+    p.add_argument("--position-scale", type=float, default=0.5)
+    p.add_argument("--rotation-scale", type=float, default=1.0)
+    p.add_argument("--tcp-z", type=float, default=0.0, help="Metres from flange to fingertips; rotation pivots here")
+    p.add_argument("--max-linear-speed", type=float, default=0.10)
+    p.add_argument("--max-angular-speed", type=float, default=0.50)
+    p.add_argument("--max-joint-speed", type=float, default=0.50)
+    p.add_argument("--max-force-delta", type=float, default=30.0, help="N above the value at clutch engage")
+    p.add_argument("--max-force-abs", type=float, default=60.0, help="N, measured; the reading at rest varies with pose, so compare with the log")
+    p.add_argument("--jog-speed", type=float, default=0.01, help="Stick speed at full deflection (m/s); A/B run at half of this")
+    p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
+    p.add_argument("--min-z", type=float, default=None, help="Lowest TCP height in the base frame (m), e.g. just above the table")
+    p.add_argument("--gripper-open", type=float, default=None, help="Jaw gap when open (m); 0.085 for the 2F-85")
+    p.add_argument("--gripper-closed", type=float, default=None, help="Jaw gap when closed (m); 0 for the 2F-85")
+    p.add_argument("--gripper-effort", type=float, default=50.0, help="Grip force (N); the 2F-85 range is 20-235")
+    p.add_argument("--gripper-speed", type=float, default=0.04, help="Fastest change in jaw gap (m/s), however hard the trigger is pulled")
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    rclpy.init()
+    if bool(args.udp_bind) != bool(args.udp_from):
+        raise SystemExit("--udp-bind and --udp-from must be used together")
+    if args.udp_bind:
+        source = UdpSource(args.udp_bind, args.udp_from, args.udp_port)
+    elif args.fake_source:
+        source = FakeSource(args.fake_amplitude, args.fake_jog)
+    else:
+        source = QuestSource(args.quest_ip)
+    node = TeleopNode(args, source)
+    node.timer.cancel()
+    if args.live:
+        error = preflight(node)
+        if error:
+            node.get_logger().error(f"Refusing to go live: {error}")
+            node.destroy_node()
+            rclpy.shutdown()
+            return 1
+    node.timer.reset()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
