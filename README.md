@@ -54,8 +54,8 @@ Then keep the sender running:
 .venv/bin/python quest_sender.py --to 100.89.37.109
 ```
 
-**On `coral`**, get the code with git (the repo is public, so no GitHub login is needed), then start a
-container on the robot's ROS domain from that folder:
+**On `coral`**, get the code with git, then start a container on the robot's ROS domain from that
+folder:
 
 ```bash
 git clone https://github.com/MahitMehta/device-assembly-teleop.git ~/device-assembly    # once
