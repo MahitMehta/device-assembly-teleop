@@ -71,10 +71,11 @@ Every `teleop_node.py` command below also needs these two flags:
 
 1. **Dry-run (default, sends nothing to the arm or gripper).** Hold grip, push your hand away from
    the headset, and check the logged x/y/z offsets move in the robot's forward direction.
-   `--robot-forward-yaw-deg` is that direction in degrees from base +x. Set it once for the setup;
-   it does not change when you turn or move around.
+   `--robot-forward-yaw-deg` is that direction in degrees from base +x. It defaults to 180 (base -x),
+   measured for this setup; change it only if the arm or workspace moves. It does not change when you
+   turn or move around.
    ```bash
-   python3 teleop_node.py --robot-forward-yaw-deg 135
+   python3 teleop_node.py --robot-forward-yaw-deg 180
    ```
 2. **Before going live:**
    - Confirm nobody else is using the arm. Switching controllers interrupts their work.
@@ -88,7 +89,7 @@ Every `teleop_node.py` command below also needs these two flags:
    ```
 3. **Go live.** The gripper position is the jaw gap in metres (2F-85: 0.085 open, 0 closed).
    ```bash
-   python3 teleop_node.py --live --robot-forward-yaw-deg <deg> --tcp-z <m> \
+   python3 teleop_node.py --live --robot-forward-yaw-deg 180 --tcp-z <m> \
      --gripper-open 0.085 --gripper-closed 0
    ```
    Trigger depth sets the jaw gap, limited to `--gripper-speed` (0.04 m/s). The node sends nothing to

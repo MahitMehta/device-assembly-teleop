@@ -355,7 +355,7 @@ def parse_args(argv=None):
     p.add_argument("--udp-from", default=None, help="The only IP allowed to send (your Mac's Tailscale IP)")
     p.add_argument("--udp-port", type=int, default=DEFAULT_PORT)
     p.add_argument("--rate", type=float, default=125.0)
-    p.add_argument("--robot-forward-yaw-deg", type=float, default=0.0, help="Robot's forward direction, degrees from base +x. Set once for the setup.")
+    p.add_argument("--robot-forward-yaw-deg", type=float, default=180.0, help="Robot's forward direction, degrees from base +x (180 = base -x, measured for this setup)")
     p.add_argument("--position-scale", type=float, default=0.5)
     p.add_argument("--rotation-scale", type=float, default=1.0)
     p.add_argument("--tcp-z", type=float, default=0.0, help="Metres from flange to fingertips; rotation pivots here")

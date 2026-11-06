@@ -288,7 +288,7 @@ def test_turning_head_with_still_hand_does_not_move_arm():
 
 
 def test_heading_stays_fixed_while_grip_is_held():
-    c = TeleopCore(HOME, Mapping(position_scale=1.0))
+    c = TeleopCore(HOME, Mapping(position_scale=1.0, robot_forward_yaw=0.0))
     start = c.target[:3, 3].copy()
     c.update(pose(), True, DT, _head_facing(0.0))
     forward = _quest_forward(0.0)
@@ -300,7 +300,7 @@ def test_heading_stays_fixed_while_grip_is_held():
 
 
 def test_new_grip_uses_new_heading():
-    c = TeleopCore(HOME, Mapping(position_scale=1.0))
+    c = TeleopCore(HOME, Mapping(position_scale=1.0, robot_forward_yaw=0.0))
     c.update(pose(), True, DT, _head_facing(0.0))
     c.update(pose(), False, DT, _head_facing(1.2))
     start = c.target[:3, 3].copy()

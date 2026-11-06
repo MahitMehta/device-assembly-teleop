@@ -143,7 +143,7 @@ class Limits:
 class Mapping:
     # Direction in the UR base frame (rad from +x) that counts as the robot's forward.
     # Fixed by the setup, so it does not change when the operator moves.
-    robot_forward_yaw: float = 0.0
+    robot_forward_yaw: float = np.pi  # base -x, measured for this setup
     # Used only when no headset pose is supplied (tests and scripted sources).
     operator_to_base: np.ndarray = field(default_factory=lambda: np.eye(3))
     position_scale: float = 0.5
