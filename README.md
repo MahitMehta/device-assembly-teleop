@@ -66,10 +66,11 @@ docker run --rm -it --network host \
 source /opt/ros/humble/setup.bash
 ```
 
-Every `teleop_node.py` command below also needs these two flags:
+Every `teleop_node.py` command below also needs these two flags, where `<VR_HEADSET_HOST_IP>` is the
+Tailscale IP of the computer the headset is plugged into (`tailscale ip -4` on that computer):
 
 ```bash
---udp-bind 100.89.37.109 --udp-from 100.107.32.64
+--udp-bind 100.89.37.109 --udp-from <VR_HEADSET_HOST_IP>
 ```
 
 1. **Dry-run (default, sends nothing to the arm or gripper).** Hold grip, push your hand away from
