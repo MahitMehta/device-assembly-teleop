@@ -48,7 +48,7 @@ git -C third_party/oculus_reader diff > quest_app.patch
 Moving your head does not move the arm. "Forward" is the way the headset faces when you press the
 grip, ignoring tilt, and it stays fixed until you release.
 
-Then keep the sender running:
+Then keep the sender running (`100.89.37.109` is `coral`'s Tailscale IP):
 
 ```bash
 .venv/bin/python quest_sender.py --to 100.89.37.109
@@ -66,8 +66,9 @@ docker run --rm -it --network host \
 source /opt/ros/humble/setup.bash
 ```
 
-Every `teleop_node.py` command below also needs these two flags, where `<VR_HEADSET_HOST_IP>` is the
-Tailscale IP of the computer the headset is plugged into (`tailscale ip -4` on that computer):
+Every `teleop_node.py` command below also needs these two flags, where `100.89.37.109` is `coral`'s
+Tailscale IP and `<VR_HEADSET_HOST_IP>` is the Tailscale IP of the computer the headset is plugged
+into (`tailscale ip -4` on that computer):
 
 ```bash
 --udp-bind 100.89.37.109 --udp-from <VR_HEADSET_HOST_IP>
