@@ -54,9 +54,12 @@ Then keep the sender running:
 .venv/bin/python quest_sender.py --to 100.89.37.109
 ```
 
-**On `coral`**, copy this folder over, then start a container on the robot's ROS domain:
+**On `coral`**, get the code with git (the repo is public, so no GitHub login is needed), then start a
+container on the robot's ROS domain from that folder:
 
 ```bash
+git clone https://github.com/MahitMehta/device-assembly-teleop.git ~/device-assembly    # once
+cd ~/device-assembly && git pull    # after each push from the Mac
 docker run --rm -it --network host \
   -e ROS_DOMAIN_ID=66 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -v "$PWD":/teleop -v /data:/data -w /teleop manip-ros2-bridge:latest bash
