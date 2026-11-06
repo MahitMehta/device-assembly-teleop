@@ -58,8 +58,8 @@ Then keep the sender running:
 folder:
 
 ```bash
-git clone https://github.com/MahitMehta/device-assembly-teleop.git ~/device-assembly    # once
-cd ~/device-assembly && git pull    # after each push from the Mac
+git clone https://github.com/MahitMehta/device-assembly-teleop.git    # once
+git pull    # in that folder, after each push from the Mac
 docker run --rm -it --network host \
   -e ROS_DOMAIN_ID=66 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -v "$PWD":/teleop -v /data:/data -w /teleop manip-ros2-bridge:latest bash
