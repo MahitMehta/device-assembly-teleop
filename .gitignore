@@ -2,3 +2,7 @@
 __pycache__/
 .pytest_cache/
 third_party/
+*.egg-info/
+build/
+install/
+log/

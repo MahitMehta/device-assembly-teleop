@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Records one demonstration to a rosbag. Usage: ./record.sh <task_name>
+# Records one demonstration to a rosbag. Usage: ./scripts/record.sh <task_name>
 set -euo pipefail
 [ "${ROS_DOMAIN_ID:-}" = "66" ] || { echo "Set ROS_DOMAIN_ID=66 first" >&2; exit 1; }
 out="/data/teleop_demos/${1:?task name required}/$(date +%Y%m%d_%H%M%S)"

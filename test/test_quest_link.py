@@ -5,7 +5,7 @@ import numpy as np
 
 import pytest
 
-from quest_link import MAGIC, NO_JOG, PACKET, UdpSource, pack, quest_sample
+from quest_teleop.utils.quest_link import MAGIC, NO_JOG, PACKET, UdpSource, pack, quest_sample
 
 MAC = ("100.64.0.5", 40000)
 

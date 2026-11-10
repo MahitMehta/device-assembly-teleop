@@ -4,22 +4,26 @@ Hold the right grip to move the arm; pull the right trigger to close the gripper
 `ur_robot_driver` already running on `coral`. Do not use `ur_rtde` control alongside it, because it
 replaces the driver's program on the arm.
 
-| File | Purpose |
+A ROS 2 `ament_python` package (`quest_teleop`). Run everything from this folder with
+`python3 -m ...`; no `colcon build` is needed.
+
+| Path | Purpose |
 |---|---|
-| `core.py` | Kinematics, clutch, and limits (no ROS) |
-| `teleop_node.py` | ROS 2 node: Quest input, safety checks, commands |
-| `gripper.py` | Drives the Robotiq 2F-85 directly through the URCap socket on the UR controller (no ROS) |
-| `quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
-| `quest_link.py` | Packet format and the sender allowlist |
-| `quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough) |
-| `check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
-| `record.sh` | Records a demonstration to a rosbag |
-| `fake_robot.py` | Driver stand-in for testing on an isolated ROS domain |
-| `test_core.py`, `test_quest_link.py`, `test_gripper.py` | Unit tests: `.venv/bin/python -m pytest -q` |
+| `quest_teleop/nodes/teleop_node.py` | ROS 2 node: Quest input, safety checks, arm and gripper commands (runs on `coral`) |
+| `quest_teleop/nodes/fake_robot.py` | Driver stand-in for testing on an isolated ROS domain |
+| `quest_teleop/utils/core.py` | Kinematics, clutch, and limits (no ROS) |
+| `quest_teleop/utils/gripper.py` | Drives the Robotiq 2F-85 directly through the URCap socket on the UR controller (no ROS) |
+| `quest_teleop/utils/quest_link.py` | Packet format and the sender allowlist |
+| `quest_teleop/tools/quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
+| `quest_teleop/tools/check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
+| `scripts/record.sh` | Records a demonstration to a rosbag |
+| `headset/quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough, stick click) |
+| `test/` | Unit tests: `.venv/bin/python -m pytest -q` |
+| `package.xml`, `setup.py`, `setup.cfg` | ROS 2 package metadata |
 
 ## Run
 
-The Quest plugs into the Mac by USB. `quest_sender.py` sends only poses and button states to `coral`
+The Quest plugs into the Mac by USB. `quest_sender` sends only poses and button states to `coral`
 over Tailscale, and `coral` accepts them only from the Mac's Tailscale IP. `coral` gets no access to
 the headset.
 
@@ -29,21 +33,21 @@ not work: the patched app also streams the headset pose and shows passthrough.
 ```bash
 git lfs install
 git clone https://github.com/jborbik/oculus_reader.git third_party/oculus_reader    # gitignored
-git -C third_party/oculus_reader apply "$PWD/quest_app.patch"
+git -C third_party/oculus_reader apply "$PWD/headset/quest_app.patch"
 (cd third_party/oculus_reader/app && JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ANDROID_HOME="$HOME/Library/Android/sdk" sh ./gradlew assembleDebug)
 .venv/bin/pip install pure-python-adb ./third_party/oculus_reader
 adb devices    # the Quest should show as "device"
 adb uninstall com.rail.oculus.teleop    # needed once: the signing key differs from the stock APK
 adb install third_party/oculus_reader/app/build/outputs/apk/debug/OculusTeleop-debug.apk
-.venv/bin/python check_quest.py    # move the right controller, squeeze grip and trigger
+.venv/bin/python -m quest_teleop.tools.check_quest    # move the right controller, squeeze grip and trigger
 ```
 
-`quest_app.patch` is the only record of our app changes; the `third_party/oculus_reader` checkout (gitignored) is upstream
+`headset/quest_app.patch` is the only record of our app changes; the `third_party/oculus_reader` checkout (gitignored) is upstream
 code plus this patch, and is not pushed anywhere. If you change the app, regenerate the patch so it
 is kept with this folder:
 
 ```bash
-git -C third_party/oculus_reader diff > quest_app.patch
+git -C third_party/oculus_reader diff > headset/quest_app.patch
 ```
 
 Moving your head does not move the arm. "Forward" is the way the headset faces when you press the
@@ -52,7 +56,7 @@ grip, ignoring tilt, and it stays fixed until you release.
 Then keep the sender running (`100.89.37.109` is `coral`'s Tailscale IP):
 
 ```bash
-.venv/bin/python quest_sender.py --to 100.89.37.109
+.venv/bin/python -m quest_teleop.tools.quest_sender --to 100.89.37.109
 ```
 
 **On `coral`**, get the code with git, then start a container on the robot's ROS domain from that
@@ -67,7 +71,7 @@ docker run --rm -it --network host \
 source /opt/ros/humble/setup.bash
 ```
 
-Every `teleop_node.py` command below also needs these two flags, where `100.89.37.109` is `coral`'s
+Every `teleop_node` command below also needs these two flags, where `100.89.37.109` is `coral`'s
 Tailscale IP and `<VR_HEADSET_HOST_IP>` is the Tailscale IP of the computer the headset is plugged
 into (`tailscale ip -4` on that computer):
 
@@ -81,7 +85,7 @@ into (`tailscale ip -4` on that computer):
    measured for this setup; change it only if the arm or workspace moves. It does not change when you
    turn or move around.
    ```bash
-   python3 teleop_node.py --robot-forward-yaw-deg 180
+   python3 -m quest_teleop.nodes.teleop_node --robot-forward-yaw-deg 180
    ```
 2. **Before going live:**
    - Confirm nobody else is using the arm. Switching controllers interrupts their work.
@@ -95,7 +99,7 @@ into (`tailscale ip -4` on that computer):
    ```
 3. **Go live.**
    ```bash
-   python3 teleop_node.py --live --robot-forward-yaw-deg 180
+   python3 -m quest_teleop.nodes.teleop_node --live --robot-forward-yaw-deg 180
    ```
    Pull the trigger (past halfway) to close the gripper, release it to open. The node drives the
    gripper itself through the Robotiq URCap socket on the UR controller (`--gripper-ip`, port
@@ -104,7 +108,7 @@ into (`tailscale ip -4` on that computer):
    slowest, and Low Force mode with Secure Grip off. The node sends nothing to the gripper until
    the trigger is first pulled, never activates it (activation moves the fingers: do it from the
    pendant), and `--no-gripper` leaves it alone entirely.
-4. **Record** from a second shell: `./record.sh <task_name>`. Ctrl-C ends the demonstration.
+4. **Record** from a second shell: `./scripts/record.sh <task_name>`. Ctrl-C ends the demonstration.
 5. **Restore** the previous controller when finished, by reversing the switch in step 2.
 
 ## Safety behaviour
@@ -131,12 +135,12 @@ do not replace the pendant's safety limits or the e-stop. The log shows `workspa
 Use a domain other than 66 so nothing can reach the robot:
 
 ```bash
-ROS_DOMAIN_ID=199 python3 fake_robot.py --duration 11 &
-ROS_DOMAIN_ID=199 python3 teleop_node.py --fake-source --live
+ROS_DOMAIN_ID=199 python3 -m quest_teleop.nodes.fake_robot --duration 11 &
+ROS_DOMAIN_ID=199 python3 -m quest_teleop.nodes.teleop_node --fake-source --live
 ```
 
 Add `--fake-jog` to exercise the stick and A/B instead of the grip. To test the network link without a
-headset, run `quest_sender.py --fake` on the Mac and start `teleop_node.py` with the `--udp-*` flags
+headset, run `quest_sender --fake` on the Mac and start `teleop_node` with the `--udp-*` flags
 instead of `--fake-source`.
 
 ## Still to confirm

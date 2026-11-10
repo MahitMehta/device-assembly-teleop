@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from quest_link import DEFAULT_PORT, NO_JOG, STALE_S, pack, quest_sample
+from quest_teleop.utils.quest_link import DEFAULT_PORT, NO_JOG, STALE_S, pack, quest_sample
 
 
 def fake_samples():

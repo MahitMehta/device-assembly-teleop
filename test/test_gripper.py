@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from gripper import GripperError, GripperWorker, URCapGripper, pos_to_gap
+from quest_teleop.utils.gripper import GripperError, GripperWorker, URCapGripper, pos_to_gap
 
 
 class FakeURCap:

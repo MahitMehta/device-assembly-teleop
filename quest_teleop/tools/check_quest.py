@@ -2,7 +2,8 @@
 """Reads the USB-connected Quest for 15 s and prints a summary. Sends nothing anywhere.
 
 Starting the reader also installs and launches its app on the headset if needed.
-Run from this folder. While it runs, move the right controller and squeeze grip and trigger.
+Run from the repo root: .venv/bin/python -m quest_teleop.tools.check_quest
+While it runs, move the right controller and squeeze grip and trigger.
 """
 import time
 

@@ -30,9 +30,9 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64, Float64MultiArray, String
 from ur_dashboard_msgs.msg import RobotMode, SafetyMode
 
-from quest_link import DEFAULT_PORT, NO_JOG, UdpSource, quest_sample
-from core import JOINT_NAMES, Limits, Mapping, TeleopCore, jog_velocity
-from gripper import STROKE_M, GripperWorker, URCapGripper
+from quest_teleop.utils.quest_link import DEFAULT_PORT, NO_JOG, UdpSource, quest_sample
+from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, jog_velocity
+from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 
 ROBOT_RUNNING, SAFETY_NORMAL = 7, 1
 JOINT_STALE_S = 0.05
@@ -352,7 +352,7 @@ def parse_args(argv=None):
     p.add_argument("--fake-amplitude", type=float, default=0.03)
     p.add_argument("--fake-jog", action="store_true", help="Scripted source uses the stick and buttons instead of the grip")
     p.add_argument("--quest-ip", default=None, help="Quest IP for wireless adb; USB if omitted")
-    p.add_argument("--udp-bind", default=None, help="coral's Tailscale IP: receive from quest_sender.py")
+    p.add_argument("--udp-bind", default=None, help="coral's Tailscale IP: receive from quest_sender")
     p.add_argument("--udp-from", default=None, help="The only IP allowed to send (your Mac's Tailscale IP)")
     p.add_argument("--udp-port", type=int, default=DEFAULT_PORT)
     p.add_argument("--rate", type=float, default=125.0)

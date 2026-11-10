@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from core import _chain, gripper_points, Limits, Mapping, TeleopCore, jog_velocity, pointing_down, yaw_of, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
+from quest_teleop.utils.core import _chain, gripper_points, Limits, Mapping, TeleopCore, jog_velocity, pointing_down, yaw_of, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
 
 DT = 1 / 125
 # Live /joint_states from coral, reordered from the driver's order into kinematic order.
