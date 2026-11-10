@@ -23,6 +23,7 @@ from controller_manager_msgs.srv import ListControllers
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -94,6 +95,7 @@ class TeleopNode(Node):
         self.force_baseline = None
         self.core = None
         self.fault = None
+        self.joints_stale = False
         self.was_moving = False
         self.jog_v = None
         self.grip_pos = None      # commanded jaw position, moved gradually toward the trigger
@@ -116,13 +118,16 @@ class TeleopNode(Node):
             min_z=args.min_z,
         )
 
-        self.create_subscription(JointState, "/joint_states", self._on_joints, qos_profile_sensor_data)
+        # Separate groups so a slow tick or gripper reply never delays the joint and force
+        # readings (one shared group runs every callback in turn).
+        sensors, control, gripper = (MutuallyExclusiveCallbackGroup() for _ in range(3))
+        self.create_subscription(JointState, "/joint_states", self._on_joints, qos_profile_sensor_data, callback_group=sensors)
         # The driver publishes these only on change, so a late subscriber needs the latched value.
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(RobotMode, "/io_and_status_controller/robot_mode", self._on_robot_mode, latched)
         self.create_subscription(SafetyMode, "/io_and_status_controller/safety_mode", self._on_safety_mode, latched)
         self.create_subscription(Float64, "/speed_scaling_state_broadcaster/speed_scaling", self._on_scaling, 10)
-        self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._on_wrench, qos_profile_sensor_data)
+        self.create_subscription(WrenchStamped, "/force_torque_sensor_broadcaster/wrench", self._on_wrench, qos_profile_sensor_data, callback_group=sensors)
 
         self.cmd_pub = self.create_publisher(Float64MultiArray, f"/{CONTROLLER}/commands", 1) if args.live else None
         self.target_pub = self.create_publisher(PoseStamped, "/teleop/target_pose", 10)
@@ -130,9 +135,9 @@ class TeleopNode(Node):
         self.status_pub = self.create_publisher(String, "/teleop/status", 10)
         self.grip_cmd_pub = self.create_publisher(Float64, "/teleop/gripper_command", 10)
         self.grip_pos_pub = self.create_publisher(Float64, "/teleop/gripper_position", 10)
-        self.grip_client = ActionClient(self, GripperCommand, "/gripper/gripper_cmd") if args.live else None
+        self.grip_client = ActionClient(self, GripperCommand, "/gripper/gripper_cmd", callback_group=gripper) if args.live else None
 
-        self.timer = self.create_timer(1.0 / args.rate, self._tick)
+        self.timer = self.create_timer(1.0 / args.rate, self._tick, callback_group=control)
 
     def _on_joints(self, msg: JointState) -> None:
         # The driver publishes joints out of kinematic order: always map by name.
@@ -194,6 +199,21 @@ class TeleopNode(Node):
 
         if self.args.live:
             reason = self._gate(q_actual)
+            if reason == "joint states stale" and not self.fault:
+                # A short gap in readings, not a sign of trouble at the arm: hold until fresh
+                # readings return, then re-engage from the current poses (like lost tracking).
+                if not self.joints_stale:
+                    age = (time.monotonic() - self.joint_time) * 1000
+                    self.get_logger().warning(f"Holding: joint states {age:.0f} ms old. Resumes when they are fresh.")
+                self.joints_stale = True
+                self.core.engaged = False
+                self.was_moving = False
+                self._publish_state(False, reason)
+                return
+            if self.joints_stale and not reason:
+                self.joints_stale = False
+                self.core.resync(q_actual)
+                self.get_logger().info("Joint states fresh again; resuming")
             if reason or self.fault:
                 if reason and reason != self.fault:
                     self.get_logger().error(f"HOLD: {reason}.{self._readout()} Release the grip and stick to clear.")

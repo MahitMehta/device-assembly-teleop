@@ -14,18 +14,21 @@ index c2b636f..331f062 100755
    <application
        android:allowBackup="false"
 diff --git a/app/src/Remotes.h b/app/src/Remotes.h
-index 21e15eb..30423f3 100644
+index 21e15eb..4533cb6 100644
 --- a/app/src/Remotes.h
 +++ b/app/src/Remotes.h
-@@ -18,6 +18,7 @@ struct RemoteState {
+@@ -16,8 +16,10 @@ struct RemoteState {
+     bool buttonB = false;
+     bool buttonX = false;
      bool buttonY = false;
++    bool stickClickR = false;
      OVR::Matrix4f LeftRemoteTransform;
      OVR::Matrix4f RightRemoteTransform;
 +    OVR::Matrix4f HeadTransform;
  };
  
  std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatrix) {
-@@ -29,6 +30,12 @@ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatr
+@@ -29,6 +31,12 @@ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatr
  
  std::string remotes_to_string(const RemoteState& state_, const OVRFW::ovrApplFrameIn& frame_) {
          std::string text;
@@ -38,8 +41,17 @@ index 21e15eb..30423f3 100644
          // right hand
          bool both_tracked = frame_.RightRemoteTracked && frame_.LeftRemoteTracked;
          if (frame_.RightRemoteTracked) {
+@@ -55,6 +63,8 @@ std::string remotes_to_string(const RemoteState& state_, const OVRFW::ovrApplFra
+                 text += "RG,";
+             if (state_.triggerTouchR_)
+                 text += "RT,";
++            if (state_.stickClickR)
++                text += "RJ,";
+             text += "rightJS " + std::to_string(frame_.RightRemoteJoystick.x) + " " +
+                     std::to_string(frame_.RightRemoteJoystick.y) + ",";
+             text += "rightTrig " + std::to_string(frame_.RightRemoteIndexTrigger) + ",";
 diff --git a/app/src/main.cpp b/app/src/main.cpp
-index e934c1e..31e847c 100755
+index e934c1e..8455655 100755
 --- a/app/src/main.cpp
 +++ b/app/src/main.cpp
 @@ -56,9 +56,20 @@ PFN_xrGetDeviceSampleRateFB xrGetDeviceSampleRateFB = nullptr;
@@ -72,7 +84,36 @@ index e934c1e..31e847c 100755
                  return extensions;
      }
  
-@@ -784,6 +796,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -224,6 +236,15 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+             2,
+             handSubactionPaths);
+ 
++        // Thumbstick click, per hand (sent as "RJ" for the right stick)
++        stickClickAction_ = CreateAction(
++            BaseActionSet,
++            XR_ACTION_TYPE_BOOLEAN_INPUT,
++            "stick_click",
++            nullptr,
++            2,
++            handSubactionPaths);
++
+         // Squeeze Value
+         squeezeValueAction_ = CreateAction(
+             BaseActionSet,
+@@ -319,6 +340,12 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+         baseTouchBindings.emplace_back(
+             ActionSuggestedBinding(triggerTouchAction_, "/user/hand/right/input/trigger/touch"));
+ 
++        // Thumbstick click
++        baseTouchBindings.emplace_back(
++            ActionSuggestedBinding(stickClickAction_, "/user/hand/left/input/thumbstick/click"));
++        baseTouchBindings.emplace_back(
++            ActionSuggestedBinding(stickClickAction_, "/user/hand/right/input/thumbstick/click"));
++
+         // Trigger Proximity
+         baseTouchBindings.emplace_back(ActionSuggestedBinding(
+             triggerProxAction_, "/user/hand/left/input/trigger/proximity"));
+@@ -784,6 +811,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
      virtual bool SessionInit() override {
          /// Use LocalSpace instead of Stage Space.
          CurrentSpace = LocalSpace;
@@ -80,7 +121,7 @@ index e934c1e..31e847c 100755
          /// Init session bound objects
          if (false == controllerRenderL_.Init(true)) {
              ALOG("AppInit::Init L controller renderer FAILED.");
-@@ -801,7 +814,53 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -801,7 +829,53 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          return true;
      }
  
@@ -134,16 +175,24 @@ index e934c1e..31e847c 100755
          controllerRenderL_.Shutdown();
          controllerRenderR_.Shutdown();
          beamRenderer_.Shutdown();
-@@ -1099,7 +1158,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -843,6 +917,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+             /// Trigger Touch
+             triggerTouchL_ = GetActionStateBoolean(triggerTouchAction_, LeftHandPath).currentState;
+             triggerTouchR_ = GetActionStateBoolean(triggerTouchAction_, RightHandPath).currentState;
++            stickClickR_ = GetActionStateBoolean(stickClickAction_, RightHandPath).currentState;
+             /// Squeeze Value
+             squeezeValueL_ = GetActionStateBoolean(squeezeValueAction_, LeftHandPath).currentState;
+             squeezeValueR_ = GetActionStateBoolean(squeezeValueAction_, RightHandPath).currentState;
+@@ -1099,7 +1174,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          bool bB = buttonB.currentState == XR_TRUE;
          bool bX = buttonX.currentState == XR_TRUE;
          bool bY = buttonY.currentState == XR_TRUE;
 -        RemoteState remoteState{triggerTouchL_, triggerTouchR_, bA, bB, bX, bY, LeftRemoteTransform, RightRemoteTransform};
-+        RemoteState remoteState{triggerTouchL_, triggerTouchR_, bA, bB, bX, bY, LeftRemoteTransform, RightRemoteTransform, headPoseMatrix};
++        RemoteState remoteState{triggerTouchL_, triggerTouchR_, bA, bB, bX, bY, stickClickR_, LeftRemoteTransform, RightRemoteTransform, headPoseMatrix};
          auto remotes_str = remotes_to_string(remoteState, in);
          __android_log_print(ANDROID_LOG_INFO, "wE9ryARX", "%s",
                              remotes_str.c_str());
-@@ -1117,8 +1176,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1117,8 +1192,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
  
      // Render eye buffers while running
      virtual void Render(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override {
@@ -153,7 +202,7 @@ index e934c1e..31e847c 100755
          /// Render controllers
          if (in.LeftRemoteTracked) {
              controllerRenderL_.Render(out.Surfaces);
-@@ -1126,9 +1184,6 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1126,9 +1200,6 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          if (in.RightRemoteTracked) {
              controllerRenderR_.Render(out.Surfaces);
          }
@@ -163,3 +212,14 @@ index e934c1e..31e847c 100755
      }
  
      void EnumerateActions() {
+@@ -1378,6 +1449,10 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+     XrAction triggerTouchAction_ = XR_NULL_HANDLE;
+     bool triggerTouchL_ = false;
+     bool triggerTouchR_ = false;
++
++    // Thumbstick click
++    XrAction stickClickAction_ = XR_NULL_HANDLE;
++    bool stickClickR_ = false;
+     OVRFW::VRMenuObject* triggerTouchLText_ = nullptr;
+     OVRFW::VRMenuObject* triggerTouchRText_ = nullptr;
+ 

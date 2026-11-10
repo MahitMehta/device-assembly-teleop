@@ -108,14 +108,13 @@ The node refuses `--live` unless `forward_position_controller` is active with th
 It holds position, and requires a grip release to clear, on any of these:
 
 - robot or safety mode not normal, or speed scaling at 0
-- joint states older than 50 ms
 - commanded and measured joints more than 0.10 rad apart
 - force over 60 N, or more than 30 N above the value when the grip was pressed
 - controller pose jump over 10 cm or 0.6 rad between frames
 
 The stick, A/B and tool-down turning follow the same holds and limits, and clear by letting go of them. They do nothing while the grip is held, or when tracking or the network drops.
 
-Lost tracking or 250 ms of network silence also holds position, and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
+Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
 +/-40 cm around the startup pose (`--box-half-extent`), at 0.10 m/s by default. The box does not know
 about the table or the robot's own base: use `--min-z` for a floor. These are software limits: they
