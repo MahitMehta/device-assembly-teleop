@@ -109,20 +109,30 @@ def operator_to_base(head: np.ndarray, robot_forward_yaw: float) -> np.ndarray:
     return base_axes @ quest_axes.T
 
 
-def jog_velocity(jog, speed: float, deadband: float = 0.15) -> np.ndarray:
-    """Turn (stick x, stick y, in/out) into a tool-frame velocity.
+def jog_velocity(jog, speed: float, yaw_speed: float, deadband: float = 0.15) -> np.ndarray:
+    """Turn (stick x, stick y, in/out) into (forward m/s, yaw rad/s, in/out m/s).
 
-    The dead zone is per axis so a nudge moves along one axis only, and the squared stick
-    response gives fine control near the centre. In/out comes from buttons, so it has one
-    speed: half of full stick. Stick right is tool +x and stick up is tool +y, matching how
-    the arm was seen to move on the robot.
+    Stick up/down drives forward/back along the way the gripper faces; stick right turns it
+    clockwise seen from above. The dead zone is per axis so a nudge does one thing only, and
+    the squared stick response gives fine control near the centre. In/out comes from
+    buttons, so it has one speed: half of full stick.
     """
     def stick(v: float) -> float:
         size = (min(abs(v), 1.0) - deadband) / (1.0 - deadband)
         return float(np.sign(v)) * size ** 2 if size > 0 else 0.0
 
     x, y, z = jog
-    return speed * np.array([stick(x), stick(y), 0.5 * float(np.clip(z, -1.0, 1.0))])
+    return np.array([speed * stick(y), -yaw_speed * stick(x), 0.5 * speed * float(np.clip(z, -1.0, 1.0))])
+
+
+def heading(R: np.ndarray) -> np.ndarray | None:
+    """The way the gripper faces, flat on the table: tool +y with its vertical part removed.
+
+    None when tool +y is nearly vertical, so the heading is not defined.
+    """
+    flat = np.array([R[0, 1], R[1, 1], 0.0])
+    n = np.linalg.norm(flat)
+    return flat / n if n > 0.2 else None
 
 
 def pointing_down(R: np.ndarray) -> np.ndarray:
@@ -271,20 +281,31 @@ class TeleopCore:
         self.q_cmd = self._ik_step(self.target, dt)
         return self.q_cmd
 
-    def jog(self, velocity_tool: np.ndarray, dt: float) -> np.ndarray:
-        """Move along the tool's own axes, holding its orientation (or turning toward the
-        tool-down lock). Same limits as hand motion."""
+    def jog(self, command: np.ndarray, dt: float) -> np.ndarray:
+        """Fine motion from jog_velocity's (forward, yaw rate, in/out).
+
+        Forward runs level along the gripper's heading, yaw turns it about vertical through
+        the TCP, and in/out runs along the tool's z axis. Same limits as hand motion.
+        """
         self.engaged = False
         self.latched_glitch = False
         self._aligning = False
         self._last_ctrl = None
         self.status = "jogging"
-        velocity = np.asarray(velocity_tool, dtype=float)
+        forward, yaw_rate, inout = (float(v) for v in command)
+        out = self.target.copy()
+        R = out[:3, :3]
+        ahead = heading(R)
+        if ahead is None and forward:
+            forward = 0.0
+            self.status = "no heading: gripper facing up or down along tool y"
+        velocity = (forward * ahead if forward else np.zeros(3)) + inout * R[:, 2]
         n = np.linalg.norm(velocity)
         if n > self.lim.max_linear_speed:
             velocity = velocity * self.lim.max_linear_speed / n
-        out = self.target.copy()
-        out[:3, 3] = self._clip_to_workspace(out[:3, 3] + out[:3, :3] @ velocity * dt, out[2, 3])
+        out[:3, 3] = self._clip_to_workspace(out[:3, 3] + velocity * dt, out[2, 3])
+        yaw_rate = float(np.clip(yaw_rate, -self.lim.max_angular_speed, self.lim.max_angular_speed))
+        out[:3, :3] = matrix_from_rotvec(np.array([0.0, 0.0, yaw_rate * dt])) @ R
         if self.tool_down:
             out = self._limited_rotation(out, pointing_down(out[:3, :3]), dt)
         self.target = out
