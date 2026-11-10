@@ -1,42 +1,49 @@
-# Run on coral from this folder, one command at a time, in the foreground:
-#   docker compose run --rm controller teleop      # switch to forward_position_controller
-#   docker compose run --rm teleop                 # dry-run (sends nothing to the arm)
-#   docker compose run --rm teleop --live          # extra args go to teleop_node
-#   docker compose run --rm record <task_name>     # from a second shell
-#   docker compose run --rm controller restore     # switch back when done
-#   docker compose run --rm ros <any command>      # e.g. ros2 topic list
+# Run on coral from this folder, one command at a time, in the foreground (Ctrl-C stops it).
+# Settings (IPs, ROS domain) come from .env: cp .example.env .env
+# Our own UR driver on our own ROS domain (67), independent of anything else on the arm.
+#   docker compose run --rm driver                  # UR driver, starts in forward_position_controller
+#   docker compose run --rm teleop                  # second shell: dry-run (sends nothing)
+#   docker compose run --rm teleop --live           # extra args go to teleop_node
+#   docker compose run --rm record <task_name>      # third shell, while live
+#   docker compose run --rm ros <any command>       # e.g. ros2 topic list
 # Nothing starts by itself and nothing restarts: every service is behind the `manual`
 # profile, so a bare `docker compose up` does nothing.
 
 x-ros: &ros
-  image: manip-ros2-bridge:latest
+  image: quest-teleop:humble
+  build: .                         # Dockerfile; built on first use (`docker compose build` to rebuild)
   network_mode: host
-  init: true                       # pass Ctrl-C through to the node
+  init: true                       # pass Ctrl-C through
   working_dir: /teleop
   volumes:
     - .:/teleop
     - /data:/data
   environment:
-    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-66}
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:?set in .env (cp .example.env .env)}
     RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
     PYTHONDONTWRITEBYTECODE: "1"   # no root-owned __pycache__ in the checkout
   profiles: [manual]
 
 services:
+  driver:
+    <<: *ros
+    # Headless: the driver sends its program to the arm itself (pendant in Remote Control),
+    # so the pendant's installation is untouched. Only one driver can control the arm.
+    entrypoint: [scripts/ros.sh, ros2, launch, ur_robot_driver, ur_control.launch.py,
+                 ur_type:=ur5e, "robot_ip:=${ROBOT_IP:?}", "reverse_ip:=${REVERSE_IP:?}",
+                 headless_mode:=true, launch_rviz:=false,
+                 initial_joint_controller:=forward_position_controller]
+    command: []
+
   teleop:
     <<: *ros
-    # coral's Tailscale IP, and the IP of the computer the headset is plugged into
     entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.teleop_node,
-                 --udp-bind, "${CORAL_IP:-100.89.37.109}", --udp-from, "${SENDER_IP:-100.107.32.64}"]
+                 --udp-bind, "${CORAL_IP:?}", --udp-from, "${SENDER_IP:?}"]
     command: []
 
   record:
     <<: *ros
     entrypoint: [scripts/ros.sh, scripts/record.sh]
-
-  controller:
-    <<: *ros
-    entrypoint: [scripts/ros.sh, scripts/switch_controller.sh]
 
   ros:
     <<: *ros

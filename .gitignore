@@ -6,3 +6,4 @@ third_party/
 build/
 install/
 log/
+.env

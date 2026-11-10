@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Records one demonstration to a rosbag. Usage: ./scripts/record.sh <task_name>
 set -euo pipefail
-[ "${ROS_DOMAIN_ID:-}" = "66" ] || { echo "Set ROS_DOMAIN_ID=66 first" >&2; exit 1; }
+[ -n "${ROS_DOMAIN_ID:-}" ] || { echo "Set ROS_DOMAIN_ID first (compose.yaml uses 67, our driver's domain)" >&2; exit 1; }
 out="/data/teleop_demos/${1:?task name required}/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$(dirname "$out")"
 exec ros2 bag record -o "$out" \
