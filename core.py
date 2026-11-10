@@ -114,15 +114,39 @@ def jog_velocity(jog, speed: float, deadband: float = 0.15) -> np.ndarray:
 
     The dead zone is per axis so a nudge moves along one axis only, and the squared stick
     response gives fine control near the centre. In/out comes from buttons, so it has one
-    speed: half of full stick. Stick up is tool +x and stick right is tool +y: looking along
-    the tool's +z, that keeps the stick's layout instead of mirroring it.
+    speed: half of full stick. Stick right is tool +x and stick up is tool +y, matching how
+    the arm was seen to move on the robot.
     """
     def stick(v: float) -> float:
         size = (min(abs(v), 1.0) - deadband) / (1.0 - deadband)
         return float(np.sign(v)) * size ** 2 if size > 0 else 0.0
 
     x, y, z = jog
-    return speed * np.array([stick(y), stick(x), 0.5 * float(np.clip(z, -1.0, 1.0))])
+    return speed * np.array([stick(x), stick(y), 0.5 * float(np.clip(z, -1.0, 1.0))])
+
+
+def pointing_down(R: np.ndarray) -> np.ndarray:
+    """The orientation with tool +z straight down (normal to the table) closest to R.
+
+    It turns about the horizontal axis only, so the yaw stays as close to R's as possible.
+    """
+    z, down = R[:, 2], np.array([0.0, 0.0, -1.0])
+    axis = np.cross(z, down)
+    angle = np.arctan2(np.linalg.norm(axis), z @ down)
+    if np.linalg.norm(axis) < 1e-9:
+        if z @ down > 0:
+            return R.copy()
+        axis = R[:, 0]  # pointing straight up: any horizontal axis turns it down
+    return matrix_from_rotvec(angle * axis / np.linalg.norm(axis)) @ R
+
+
+def yaw_of(rotvec: np.ndarray) -> float:
+    """The part of a base-frame rotation that turns about vertical (swing-twist split)."""
+    th = np.linalg.norm(rotvec)
+    if th < 1e-12:
+        return 0.0
+    w, z = np.cos(th / 2), np.sin(th / 2) * rotvec[2] / th
+    return 2 * np.arctan2(z, w)
 
 
 @dataclass
@@ -169,22 +193,55 @@ class TeleopCore:
         self.status = "idle"
         self._ctrl0 = self._tcp0 = self._last_ctrl = None
         self._rotation = self.map.operator_to_base
+        self.tool_down = False
+        self._aligning = False
+        self._was_click = False
+
+    def click(self, pressed: bool) -> bool | None:
+        """Feed the stick-click state every tick. Each new press toggles tool-down mode.
+
+        Returns the new mode when this press toggled it, else None.
+        """
+        toggled = pressed and not self._was_click
+        self._was_click = pressed
+        if not toggled:
+            return None
+        self.set_tool_down(not self.tool_down)
+        return self.tool_down
+
+    def set_tool_down(self, on: bool) -> None:
+        """Keep the tool pointing straight down (normal to the table), or stop doing so.
+
+        While on, the tool turns down by itself at the angular speed limit whenever the
+        grip is released and the controller is live, then holds there. Hand tilt is ignored
+        but hand twist about vertical still turns the tool. Toggling drops the clutch so the
+        next update re-references both poses and the arm does not jump.
+        """
+        self.tool_down = bool(on)
+        self.engaged = False
+        self._aligning = False
+        self._last_ctrl = None
 
     def resync(self, q_actual) -> None:
         """Adopt the measured joints and drop the clutch (used after any fault)."""
         self.q_cmd = np.array(q_actual, dtype=float)
         self.target = fk(self.q_cmd, self.map.tcp_offset)
         self.engaged = False
+        self._aligning = False
         self._last_ctrl = None
 
     def update(self, ctrl: np.ndarray | None, clutch: bool, dt: float, head: np.ndarray | None = None) -> np.ndarray:
         if ctrl is None or not clutch:
             self.engaged = False
             self.latched_glitch = False if not clutch else self.latched_glitch
-            self.status = "tracking lost" if clutch else "idle"
             self._last_ctrl = None
+            if self.tool_down and ctrl is not None:
+                return self._align(dt)
+            self._aligning = False
+            self.status = "tracking lost" if clutch else "idle"
             self.target = fk(self.q_cmd, self.map.tcp_offset)
             return self.q_cmd
+        self._aligning = False
 
         if self.latched_glitch:
             self.status = "glitch: release and re-grip"
@@ -215,9 +272,11 @@ class TeleopCore:
         return self.q_cmd
 
     def jog(self, velocity_tool: np.ndarray, dt: float) -> np.ndarray:
-        """Move along the tool's own axes, holding its orientation. Same limits as hand motion."""
+        """Move along the tool's own axes, holding its orientation (or turning toward the
+        tool-down lock). Same limits as hand motion."""
         self.engaged = False
         self.latched_glitch = False
+        self._aligning = False
         self._last_ctrl = None
         self.status = "jogging"
         velocity = np.asarray(velocity_tool, dtype=float)
@@ -226,6 +285,8 @@ class TeleopCore:
             velocity = velocity * self.lim.max_linear_speed / n
         out = self.target.copy()
         out[:3, 3] = self._clip_to_workspace(out[:3, 3] + out[:3, :3] @ velocity * dt, out[2, 3])
+        if self.tool_down:
+            out = self._limited_rotation(out, pointing_down(out[:3, :3]), dt)
         self.target = out
         self.q_cmd = self._ik_step(out, dt)
         return self.q_cmd
@@ -247,10 +308,28 @@ class TeleopCore:
         R = self._rotation
         out = np.eye(4)
         out[:3, 3] = self._tcp0[:3, 3] + self.map.position_scale * R @ (ctrl[:3, 3] - self._ctrl0[:3, 3])
-        rel = rotvec_from_matrix(ctrl[:3, :3] @ self._ctrl0[:3, :3].T)
-        out[:3, :3] = matrix_from_rotvec(self.map.rotation_scale * R @ rel) @ self._tcp0[:3, :3]
+        turn = self.map.rotation_scale * R @ rotvec_from_matrix(ctrl[:3, :3] @ self._ctrl0[:3, :3].T)
+        if self.tool_down:
+            # Tilt stays down; only the hand's twist about vertical turns the tool.
+            out[:3, :3] = matrix_from_rotvec(np.array([0.0, 0.0, yaw_of(turn)])) @ pointing_down(self._tcp0[:3, :3])
+        else:
+            out[:3, :3] = matrix_from_rotvec(turn) @ self._tcp0[:3, :3]
         out[:3, 3] = self._clip_to_workspace(out[:3, 3], self._tcp0[2, 3])
         return out
+
+    def _align(self, dt: float) -> np.ndarray:
+        """Turn toward pointing down in place, keeping the current yaw."""
+        if not self._aligning:
+            self._aligning = True
+            self.target = fk(self.q_cmd, self.map.tcp_offset)
+        goal = pointing_down(self.target[:3, :3])
+        if np.linalg.norm(rotvec_from_matrix(goal @ self.target[:3, :3].T)) < 1e-4:
+            self.status = "idle"
+            return self.q_cmd
+        self.status = "turning tool down"
+        self.target = self._limited_rotation(self.target, goal, dt)
+        self.q_cmd = self._ik_step(self.target, dt)
+        return self.q_cmd
 
     def _clip_to_workspace(self, position: np.ndarray, start_z: float) -> np.ndarray:
         half = self.lim.box_half_extent
@@ -268,7 +347,11 @@ class TeleopCore:
         dp = desired[:3, 3] - out[:3, 3]
         n = np.linalg.norm(dp)
         out[:3, 3] += dp * min(1.0, self.lim.max_linear_speed * dt / max(n, 1e-12))
-        dr = rotvec_from_matrix(desired[:3, :3] @ out[:3, :3].T)
+        return self._limited_rotation(out, desired[:3, :3], dt)
+
+    def _limited_rotation(self, pose: np.ndarray, R_goal: np.ndarray, dt: float) -> np.ndarray:
+        out = pose.copy()
+        dr = rotvec_from_matrix(R_goal @ out[:3, :3].T)
         n = np.linalg.norm(dr)
         out[:3, :3] = matrix_from_rotvec(dr * min(1.0, self.lim.max_angular_speed * dt / max(n, 1e-12))) @ out[:3, :3]
         return out

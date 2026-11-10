@@ -22,7 +22,7 @@ def fake_samples():
         t = time.monotonic() - t0
         pose = np.eye(4)
         pose[:3, 3] = [0.03 * math.sin(t), 0.0, 0.0]
-        yield pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG
+        yield pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG, False
 
 
 def quest_samples():
@@ -47,14 +47,14 @@ def main() -> None:
     samples = fake_samples() if args.fake else quest_samples()
     seq, last, changed, sent, start = 0, None, 0.0, 0, time.monotonic()
     while args.duration is None or time.monotonic() - start < args.duration:
-        pose, clutch, trigger, head, jog = next(samples)
+        pose, clutch, trigger, head, jog, click = next(samples)
         now = time.monotonic()
         if pose is not None and (last is None or not np.array_equal(pose, last)):
             last, changed = pose.copy(), now
         if pose is not None and now - changed <= STALE_S:
             seq += 1
             try:
-                sock.send(pack(seq, pose, head, clutch, trigger, jog))
+                sock.send(pack(seq, pose, head, clutch, trigger, jog, click))
                 sent += 1
             except OSError:
                 pass  # Link dropped: coral holds the arm, and sending resumes when it returns.

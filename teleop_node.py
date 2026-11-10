@@ -6,6 +6,8 @@ This node never switches controllers. Activate forward_position_controller yours
 
 Controls (right controller): hold grip = move, trigger = gripper,
 and with the grip released: stick = fine sideways motion, A/B = fine in/out, in the tool's own frame.
+Click the stick to toggle tool-down mode: the gripper turns to point straight down and stays
+that way; twisting your hand still turns it about vertical. Any hold turns the mode off.
 """
 from __future__ import annotations
 
@@ -48,15 +50,15 @@ class QuestSource:
         self._last, self._changed = None, 0.0
 
     def read(self):
-        """Return (pose or None, clutch, trigger, head, jog). Identical poses mean a frozen stream."""
+        """Return (pose or None, clutch, trigger, head, jog, click). Identical poses mean a frozen stream."""
         transforms, buttons = self._reader.get_transformations_and_buttons()
-        pose, clutch, trigger, head, jog = quest_sample(transforms or {}, buttons or {})
+        pose, clutch, trigger, head, jog, click = quest_sample(transforms or {}, buttons or {})
         now = time.monotonic()
         if pose is not None and (self._last is None or not np.array_equal(pose, self._last)):
             self._last, self._changed = pose.copy(), now
         if pose is None or now - self._changed > QUEST_STALE_S:
             pose = None
-        return pose, clutch, trigger, head, jog
+        return pose, clutch, trigger, head, jog, click
 
 
 class FakeSource:
@@ -75,8 +77,8 @@ class FakeSource:
             # Grip released throughout: stick, then a neutral gap, then the in/out button.
             phase = t % 8.0
             jog = (1.0, 0.0, 0.0) if phase < 3.0 else (0.0, 0.0, 1.0) if 4.0 < phase < 6.0 else NO_JOG
-            return pose, False, 0.0, np.eye(4), jog
-        return pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG
+            return pose, False, 0.0, np.eye(4), jog, False
+        return pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG, False
 
 
 class TeleopNode(Node):
@@ -177,8 +179,13 @@ class TeleopNode(Node):
         if self.core is None:
             self.core = TeleopCore(q_actual, self.mapping, self.limits)
             self.get_logger().info("Initialized from measured joints")
+            if self.args.tool_down:
+                self.core.set_tool_down(True)
 
-        pose, clutch, trigger, head, jog = self.source.read()
+        pose, clutch, trigger, head, jog, click = self.source.read()
+        toggled = self.core.click(click)
+        if toggled is not None:
+            self.get_logger().info("Tool-down mode ON: turning the gripper to point down" if toggled else "Tool-down mode OFF")
 
         # The stick works only with the grip released and a live, tracked controller.
         jog_v = jog_velocity(jog, self.args.jog_speed) if pose is not None and not clutch else np.zeros(3)
@@ -190,6 +197,10 @@ class TeleopNode(Node):
             if reason or self.fault:
                 if reason and reason != self.fault:
                     self.get_logger().error(f"HOLD: {reason}.{self._readout()} Release the grip and stick to clear.")
+                    if self.core.tool_down:
+                        # Otherwise the arm would start turning by itself once the hold clears.
+                        self.core.set_tool_down(False)
+                        self.get_logger().warning("Tool-down mode turned OFF by the hold; click the stick to turn it on again")
                 # As with re-gripping: letting go first stops a held stick pushing on after a hold.
                 self.fault = reason or (self.fault if clutch or jogging else None)
                 self.jog_v = None
@@ -270,7 +281,7 @@ class TeleopNode(Node):
 
     def _readout(self) -> str:
         """Force and gripper values for the log, to compare against the limits."""
-        out = ""
+        out = " tool-down" if self.core is not None and self.core.tool_down else ""
         if self.jog_v is not None:
             x, y, z = self.jog_v * 1000
             out += f" tool mm/s: x={x:+.1f} y={y:+.1f} z={z:+.1f}"
@@ -364,6 +375,7 @@ def parse_args(argv=None):
     p.add_argument("--max-joint-speed", type=float, default=0.50)
     p.add_argument("--max-force-delta", type=float, default=30.0, help="N above the value at clutch engage")
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N, measured; the reading at rest varies with pose, so compare with the log")
+    p.add_argument("--tool-down", action="store_true", help="Start in tool-down mode (stick click toggles it)")
     p.add_argument("--jog-speed", type=float, default=0.01, help="Stick speed at full deflection (m/s); A/B run at half of this")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=None, help="Lowest TCP height in the base frame (m), e.g. just above the table")

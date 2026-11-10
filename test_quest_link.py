@@ -17,20 +17,20 @@ def source():
 def test_accepts_allowed_sender():
     s = source()
     assert s.accept(pack(1, np.eye(4), np.eye(4), True, 0.5), MAC, now=0.0)
-    pose, clutch, trigger, _, _ = s.read(now=0.1)
+    pose, clutch, trigger, _, _, _ = s.read(now=0.1)
     assert np.array_equal(pose, np.eye(4)) and clutch and trigger == 0.5
 
 
 def test_rejects_other_senders():
     s = source()
     assert not s.accept(pack(1, np.eye(4), np.eye(4), True, 0.5), ("100.64.0.6", 40000), now=0.0)
-    assert s.read(now=0.0) == (None, False, None, None, NO_JOG)
+    assert s.read(now=0.0) == (None, False, None, None, NO_JOG, False)
 
 
 def test_rejects_malformed_packets():
     s = source()
-    bad_magic = PACKET.pack(b"XXXX", 1, *np.eye(4).ravel(), *np.eye(4).ravel(), True, 0.5, *NO_JOG)
-    nan_pose = PACKET.pack(MAGIC, 2, *(np.eye(4) * np.nan).ravel(), *np.eye(4).ravel(), True, 0.5, *NO_JOG)
+    bad_magic = PACKET.pack(b"XXXX", 1, *np.eye(4).ravel(), *np.eye(4).ravel(), True, 0.5, *NO_JOG, False)
+    nan_pose = PACKET.pack(MAGIC, 2, *(np.eye(4) * np.nan).ravel(), *np.eye(4).ravel(), True, 0.5, *NO_JOG, False)
     for data in (b"", b"short", bad_magic, nan_pose, pack(3, np.eye(4), np.eye(4), True, 7.0)):
         assert not s.accept(data, MAC, now=0.0)
     assert s.read(now=0.0)[0] is None
@@ -52,7 +52,7 @@ def test_sender_restart_is_accepted():
 def test_silence_drops_clutch_but_keeps_gripper():
     s = source()
     s.accept(pack(1, np.eye(4), np.eye(4), True, 0.9), MAC, now=0.0)
-    pose, clutch, trigger, _, _ = s.read(now=1.0)
+    pose, clutch, trigger, _, _, _ = s.read(now=1.0)
     assert pose is None and clutch is False and abs(trigger - 0.9) < 1e-6
 
 
@@ -75,7 +75,7 @@ def test_head_is_delivered():
 def test_sample_computes_world_pose_from_head():
     head, rel = np.eye(4), np.eye(4)
     head[0, 3], rel[1, 3] = 1.0, 2.0
-    pose, clutch, trigger, got, _ = quest_sample({"r": rel, "h": head}, {"RG": True, "rightTrig": (0.7,)})
+    pose, clutch, trigger, got, _, _ = quest_sample({"r": rel, "h": head}, {"RG": True, "rightTrig": (0.7,)})
     assert np.allclose(pose[:3, 3], [1.0, 2.0, 0.0]) and clutch and trigger == 0.7 and got is head
 
 
@@ -102,3 +102,13 @@ def test_quest_sample_reads_stick_and_buttons():
     assert quest_sample(t, {"rightJS": (0.25, -0.5), "A": True})[4] == (0.25, -0.5, 1.0)
     assert quest_sample(t, {"B": True})[4] == (0.0, 0.0, -1.0)
     assert quest_sample(t, {})[4] == NO_JOG
+
+
+def test_stick_click_is_delivered_and_silence_clears_it():
+    t = {"r": np.eye(4), "h": np.eye(4)}
+    assert quest_sample(t, {"RJ": True})[5] is True
+    assert quest_sample(t, {})[5] is False
+    s = source()
+    assert s.accept(pack(1, np.eye(4), np.eye(4), False, 0.0, NO_JOG, True), MAC, now=0.0)
+    assert s.read(now=0.1)[5] is True
+    assert s.read(now=1.0)[5] is False

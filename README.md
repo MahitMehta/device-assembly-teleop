@@ -1,6 +1,6 @@
 # UR5e Quest 3 teleop
 
-Hold the right grip to move the arm; the right trigger controls the gripper. For fine motion, release the grip: the stick moves the tool along its own axes (up = +x, right = +y), and A/B move it toward and away from the fingertips along its z axis (`--jog-speed`, 1 cm/s at full stick, A/B at half that). Commands go through the
+Hold the right grip to move the arm; the right trigger controls the gripper. For fine motion, release the grip: the stick moves the tool along its own axes (right = +x, up = +y), and A/B move it toward and away from the fingertips along its z axis (`--jog-speed`, 1 cm/s at full stick, A/B at half that). Click the stick to toggle **tool-down mode**: the arm turns the gripper to point straight down at the table by itself (at `--max-angular-speed`, in place, keeping its yaw) and keeps it there. While gripping, hand tilt is ignored but twisting your hand still turns the gripper about vertical. It turns only while the controller is tracked and the link is live, and any hold turns the mode off so it never resumes by itself. `--tool-down` starts with it on, so the arm turns down as soon as the node starts. Commands go through the
 `ur_robot_driver` already running on `coral`. Do not use `ur_rtde` control alongside it, because it
 replaces the driver's program on the arm.
 
@@ -113,7 +113,7 @@ It holds position, and requires a grip release to clear, on any of these:
 - force over 60 N, or more than 30 N above the value when the grip was pressed
 - controller pose jump over 10 cm or 0.6 rad between frames
 
-The stick and A/B follow the same holds and limits, and clear by letting go of them. They do nothing while the grip is held, or when tracking or the network drops.
+The stick, A/B and tool-down turning follow the same holds and limits, and clear by letting go of them. They do nothing while the grip is held, or when tracking or the network drops.
 
 Lost tracking or 250 ms of network silence also holds position, and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of

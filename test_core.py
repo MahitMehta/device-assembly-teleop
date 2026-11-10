@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from core import Limits, Mapping, TeleopCore, jog_velocity, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
+from core import Limits, Mapping, TeleopCore, jog_velocity, pointing_down, yaw_of, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
 
 DT = 1 / 125
 # Live /joint_states from coral, reordered from the driver's order into kinematic order.
@@ -159,12 +159,12 @@ def test_jog_direction_differs_when_the_tool_is_turned():
 
 def test_jog_velocity_shape():
     assert np.array_equal(jog_velocity((0.1, -0.14, 0.0), 0.01), np.zeros(3))
-    assert np.allclose(jog_velocity((1.0, -1.0, 1.0), 0.01), [-0.01, 0.01, 0.005])
+    assert np.allclose(jog_velocity((1.0, -1.0, 1.0), 0.01), [0.01, -0.01, 0.005])
     # Half stick is well under half speed, for fine control.
-    assert 0 < jog_velocity((0.5, 0.0, 0.0), 0.01)[1] < 0.002
-    # Not mirrored: looking along tool +z, right x up points back at the viewer.
-    right, up = jog_velocity((1.0, 0.0, 0.0), 1.0), jog_velocity((0.0, 1.0, 0.0), 1.0)
-    assert np.allclose(np.cross(right, up), [0.0, 0.0, -1.0])
+    assert 0 < jog_velocity((0.5, 0.0, 0.0), 0.01)[0] < 0.002
+    # Stick right is tool +x, stick up is tool +y.
+    assert np.allclose(jog_velocity((1.0, 0.0, 0.0), 1.0), [1.0, 0.0, 0.0])
+    assert np.allclose(jog_velocity((0.0, 1.0, 0.0), 1.0), [0.0, 1.0, 0.0])
     assert np.allclose(jog_velocity((0.0, 0.0, -1.0), 0.01), [0.0, 0.0, -0.005])
 
 
@@ -323,3 +323,103 @@ def test_grip_motion_reports_robot_axes_after_turning():
     for _ in range(125):
         c.update(pose(*(forward * 0.05)), True, DT, head)
     assert np.allclose(c.grip_motion(), [0.05, 0, 0], atol=1e-3)
+
+
+DOWN = np.array([0.0, 0.0, -1.0])
+
+
+def _tool_z(c):
+    return fk(c.q_cmd, c.map.tcp_offset)[:3, 2]
+
+
+def test_pointing_down_keeps_yaw_and_handles_straight_up():
+    tilted = matrix_from_rotvec(np.array([0.0, 0.0, 0.7])) @ matrix_from_rotvec(np.array([np.pi - 0.4, 0.0, 0.0]))
+    R = pointing_down(tilted)
+    assert np.allclose(R[:, 2], DOWN) and np.allclose(R.T @ R, np.eye(3))
+    # Only a tilt: tool x keeps its heading in the horizontal plane.
+    x0, x1 = tilted[:2, 0] / np.linalg.norm(tilted[:2, 0]), R[:2, 0] / np.linalg.norm(R[:2, 0])
+    assert np.allclose(x0, x1, atol=1e-9)
+    assert np.allclose(pointing_down(np.eye(3))[:, 2], DOWN)
+    flat_down = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))
+    assert np.allclose(pointing_down(flat_down), flat_down)
+
+
+def test_tool_down_turns_down_by_itself_in_place():
+    c = TeleopCore(LIVE_Q)
+    assert _tool_z(c) @ DOWN < 0.99
+    start = fk(c.q_cmd)[:3, 3].copy()
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)
+    assert _tool_z(c) @ DOWN > 0.9999
+    assert np.allclose(fk(c.q_cmd)[:3, 3], start, atol=1e-3)
+    # Once down it stays put.
+    q = c.q_cmd.copy()
+    run(c, [pose()] * 50, clutch=False)
+    assert np.allclose(c.q_cmd, q, atol=1e-6)
+
+
+def test_tool_down_holds_without_a_live_controller():
+    c = TeleopCore(LIVE_Q)
+    q = c.q_cmd.copy()
+    c.set_tool_down(True)
+    run(c, [None] * 50, clutch=False)
+    run(c, [None] * 50, clutch=True)
+    assert np.array_equal(c.q_cmd, q)
+
+
+def test_tool_down_ignores_hand_tilt_but_follows_twist():
+    c = TeleopCore(LIVE_Q)
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)
+    R0 = fk(c.q_cmd)[:3, :3].copy()
+    start = fk(c.q_cmd)[:3, 3].copy()
+    # Tilt plus a 0.3 rad twist about vertical, while moving 4 cm (2 cm at scale 0.5).
+    hand = [pose(0.04 * i / 250, 0, 0, rot=(0.5 * i / 250, 0.0, 0.3 * i / 250)) for i in range(251)]
+    run(c, [pose()] + hand + [hand[-1]] * 250)
+    R = fk(c.q_cmd)[:3, :3]
+    assert R[:, 2] @ DOWN > 0.9999
+    x0, x1 = R0[:, 0], R[:, 0]
+    yaw = np.arctan2(np.cross(x0, x1)[2], x0 @ x1)
+    assert abs(yaw - yaw_of(np.array([0.5, 0.0, 0.3]))) < 5e-3 and yaw > 0.25
+    assert np.allclose(fk(c.q_cmd)[:3, 3] - start, [0.02, 0, 0], atol=2e-3)
+
+
+def test_tool_down_turns_at_the_angular_limit():
+    c = TeleopCore(LIVE_Q, limits=Limits(max_angular_speed=0.2))
+    c.set_tool_down(True)
+    prev = fk(c.q_cmd)[:3, :3]
+    c.update(pose(), True, DT)  # engage
+    for _ in range(20):
+        c.update(pose(), True, DT)
+        R = c.target[:3, :3]
+        assert np.linalg.norm(rotvec_from_matrix(R @ prev.T)) <= 0.2 * DT + 1e-9
+        prev = R
+
+
+def test_jog_aligns_to_tool_down():
+    c = TeleopCore(LIVE_Q)
+    c.set_tool_down(True)
+    _jog_for(c, np.array([0.0, 0.0, 0.001]), seconds=6.0)
+    assert _tool_z(c) @ DOWN > 0.9999
+
+
+def test_toggling_tool_down_off_mid_grip_does_not_jump():
+    c = TeleopCore(LIVE_Q)
+    c.set_tool_down(True)
+    run(c, [pose()] * int(3 / DT))
+    q = c.q_cmd.copy()
+    c.set_tool_down(False)
+    c.update(pose(0.0, 0, 0, rot=(0.0, 0.4, 0.0)), True, DT)  # re-engages here
+    assert np.array_equal(c.q_cmd, q)
+
+
+def test_each_stick_click_toggles_tool_down():
+    c = TeleopCore(LIVE_Q)
+    assert c.click(True) is True and c.tool_down
+    assert c.click(True) is None and c.tool_down      # still held: no change
+    assert c.click(False) is None and c.tool_down     # released: stays on
+    assert c.click(True) is False and not c.tool_down  # second press: off
+    c.click(False)
+    q = c.q_cmd.copy()
+    run(c, [pose()] * 50, clutch=False)
+    assert np.array_equal(c.q_cmd, q)  # off means it no longer turns
