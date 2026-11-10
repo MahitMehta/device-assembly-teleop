@@ -40,8 +40,8 @@ JOINT_STALE_S = 0.05
 QUEST_STALE_S = 0.25
 MAX_TRACKING_ERROR = 0.10   # rad between commanded and measured joints
 CONTROLLER = "forward_position_controller"
-TRIGGER_START = 0.05        # trigger depth that first wakes the gripper
-GRIP_PERIOD_S = 0.1         # shortest time between gripper goals
+TRIGGER_CLOSE = 0.5         # trigger depth that closes the gripper
+TRIGGER_OPEN = 0.3          # ...and below which it opens again
 GRIP_GOAL_TIMEOUT_S = 6.0   # the server gives up on a move after 5 s
 
 
@@ -99,9 +99,8 @@ class TeleopNode(Node):
         self.joints_stale = False
         self.was_moving = False
         self.jog_v = None
-        self.grip_pos = None      # commanded jaw position, moved gradually toward the trigger
-        self.last_grip_sent = None
-        self.last_grip_time = 0.0
+        self.grip_closed = None   # wanted state from the trigger; None until first pulled
+        self.grip_sent = None     # state last sent to the gripper server
         self.grip_busy_since = None
         self.grip_warned = False
         self.grip_result = None   # (gap m, force N the server used, holding an object)
@@ -249,34 +248,25 @@ class TeleopNode(Node):
         self._publish_state(moving, self.core.status)
 
     def _send_gripper(self, trigger: float | None) -> None:
+        """Trigger pulled = close, released = open. One goal per change."""
         opened, closed = self.args.gripper_open, self.args.gripper_closed
         if trigger is None or opened is None or closed is None:
             return
-        if self.grip_pos is None:
-            # The server reports no position, so leave the gripper alone until the trigger is
-            # first pulled: commanding "open" at startup would drop anything it is holding.
-            if trigger < TRIGGER_START:
-                return
-            self.grip_pos = opened
-        # Trigger depth sets the position; the speed limit makes a hard squeeze close gradually.
-        want = opened + trigger * (closed - opened)
-        step = self.args.gripper_speed / self.args.rate
-        delta = want - self.grip_pos
-        self.grip_pos = want if abs(delta) <= step else self.grip_pos + math.copysign(step, delta)
-
-        pos = self.grip_pos
-        now = time.monotonic()
-        if now - self.last_grip_time < GRIP_PERIOD_S:
+        # Two thresholds so a trigger resting near one of them doesn't flicker the gripper.
+        want = trigger > TRIGGER_OPEN if self.grip_closed else trigger >= TRIGGER_CLOSE
+        if self.grip_closed is None and not want:
+            # Leave the gripper alone until the trigger is first pulled: commanding "open"
+            # at startup would drop anything it is holding.
             return
-        if self.last_grip_sent is not None:
-            moved = abs(pos - self.last_grip_sent)
-            if moved == 0.0 or (moved < 0.01 * abs(closed - opened) and pos != want):
-                return
-        # The server runs one blocking move at a time, so goals sent faster than it finishes
-        # would queue up and the gripper would lag behind the trigger.
+        self.grip_closed = want
+        if want == self.grip_sent:
+            return
+        now = time.monotonic()
+        # The server runs one blocking move at a time; send the change once it is free.
         if self.grip_busy_since is not None and now - self.grip_busy_since < GRIP_GOAL_TIMEOUT_S:
             return
-        self.last_grip_sent, self.last_grip_time = pos, now
+        pos = closed if want else opened
+        self.grip_sent = want
         self.grip_cmd_pub.publish(Float64(data=pos))
         if self.grip_client is None:
             return
@@ -284,6 +274,7 @@ class TeleopNode(Node):
             if not self.grip_warned:
                 self.grip_warned = True
                 self.get_logger().warning("Gripper server not available: gripper commands are not reaching it")
+            self.grip_sent = None  # try again next tick
             return
         goal = GripperCommand.Goal()
         goal.command.position = pos
@@ -318,8 +309,8 @@ class TeleopNode(Node):
             out += f" force={np.linalg.norm(self.force):.0f}N"
             if self.force_baseline is not None:
                 out += f" change={np.linalg.norm(self.force - self.force_baseline):.0f}N"
-        if self.grip_pos is not None:
-            out += f" gripper={self.grip_pos * 1000:.0f}mm"
+        if self.grip_closed is not None:
+            out += f" gripper={'closed' if self.grip_closed else 'open'}"
         if self.grip_result is not None:
             gap, force, holding = self.grip_result
             # From the gripper server's last reply: the force it set, and where the jaws stopped.
@@ -417,7 +408,6 @@ def parse_args(argv=None):
     p.add_argument("--gripper-open", type=float, default=None, help="Jaw gap when open (m); 0.085 for the 2F-85")
     p.add_argument("--gripper-closed", type=float, default=None, help="Jaw gap when closed (m); 0 for the 2F-85")
     p.add_argument("--gripper-effort", type=float, default=50.0, help="Grip force (N); the 2F-85 range is 20-235")
-    p.add_argument("--gripper-speed", type=float, default=0.04, help="Fastest change in jaw gap (m/s), however hard the trigger is pulled")
     return p.parse_args(argv)
 
 

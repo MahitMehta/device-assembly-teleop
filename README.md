@@ -1,6 +1,6 @@
 # UR5e Quest 3 teleop
 
-Hold the right grip to move the arm; the right trigger controls the gripper. For fine motion, release the grip: stick up/down drives the gripper forward/back, level, along the way it faces (tool +y, flattened onto the table); stick left/right turns it about vertical through the TCP (right = clockwise from above); A/B move it toward and away from the fingertips along its z axis. Speeds: `--jog-speed` (1 cm/s at full stick, A/B at half that) and `--jog-yaw-speed` (0.3 rad/s at full stick). Click the stick to toggle **tool-down mode**: the arm turns the gripper to point straight down at the table by itself (at `--max-angular-speed`, in place, keeping its yaw) and keeps it there. While gripping, hand tilt is ignored but twisting your hand still turns the gripper about vertical. It turns only while the controller is tracked and the link is live, and any hold turns the mode off so it never resumes by itself. `--tool-down` starts with it on, so the arm turns down as soon as the node starts. Commands go through the
+Hold the right grip to move the arm; pull the right trigger to close the gripper and release it to open. For fine motion, release the grip: stick up/down drives the gripper forward/back, level, along the way it faces (tool +y, flattened onto the table); stick left/right turns it about vertical through the TCP (right = clockwise from above); A/B move it toward and away from the fingertips along its z axis. Speeds: `--jog-speed` (1 cm/s at full stick, A/B at half that) and `--jog-yaw-speed` (0.3 rad/s at full stick). Click the stick to toggle **tool-down mode**: the arm turns the gripper to point straight down at the table by itself (at `--max-angular-speed`, in place, keeping its yaw) and keeps it there. While gripping, hand tilt is ignored but twisting your hand still turns the gripper about vertical. It turns only while the controller is tracked and the link is live, and any hold turns the mode off so it never resumes by itself. `--tool-down` starts with it on, so the arm turns down as soon as the node starts. Commands go through the
 `ur_robot_driver` already running on `coral`. Do not use `ur_rtde` control alongside it, because it
 replaces the driver's program on the arm.
 
@@ -97,8 +97,9 @@ into (`tailscale ip -4` on that computer):
    python3 teleop_node.py --live --robot-forward-yaw-deg 180 --tcp-z <m> \
      --gripper-open 0.085 --gripper-closed 0
    ```
-   Trigger depth sets the jaw gap, limited to `--gripper-speed` (0.04 m/s). The node sends nothing to
-   the gripper until the trigger is first pulled, then assumes it starts open.
+   Pull the trigger (past halfway) to close the gripper, release it to open. `--gripper-effort` sets
+   the grip force in newtons (20 = the 2F-85's Low Force mode). The node sends nothing to the gripper
+   until the trigger is first pulled.
 4. **Record** from a second shell: `./record.sh <task_name>`. Ctrl-C ends the demonstration.
 5. **Restore** the previous controller when finished, by reversing the switch in step 2.
 
