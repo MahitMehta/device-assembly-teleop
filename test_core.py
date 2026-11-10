@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from core import Limits, Mapping, TeleopCore, jog_velocity, pointing_down, yaw_of, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
+from core import _chain, gripper_points, Limits, Mapping, TeleopCore, jog_velocity, pointing_down, yaw_of, operator_to_base, fk, jacobian, matrix_from_rotvec, rotvec_from_matrix
 
 DT = 1 / 125
 # Live /joint_states from coral, reordered from the driver's order into kinematic order.
@@ -461,3 +461,53 @@ def test_each_stick_click_toggles_tool_down():
     q = c.q_cmd.copy()
     run(c, [pose()] * 50, clutch=False)
     assert np.array_equal(c.q_cmd, q)  # off means it no longer turns
+
+
+def _lowest_gripper_point(c):
+    flange = fk(c.q_cmd)
+    pts = flange[:3, :3] @ gripper_points(0.17).T + flange[:3, 3:4]
+    return pts[2].min()
+
+
+def test_fingertips_stop_at_the_floor_and_slide_along_it():
+    c = TeleopCore(LIVE_Q)
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)
+    floor = _lowest_gripper_point(c) - 0.03
+    c = TeleopCore(c.q_cmd, limits=Limits(min_z=floor, gripper_length=0.17))
+    start = fk(c.q_cmd)[:3, 3].copy()
+    # Push the hand 20 cm down (10 cm at scale 0.5), then 4 cm sideways while still pushing.
+    path = ramp((0, 0, 0), (0, 0, -0.2), 2.0) + ramp((0, 0, -0.2), (0, 0.04, -0.2), 1.0)
+    run(c, path + [path[-1]] * 250)
+    assert abs(_lowest_gripper_point(c) - floor) < 2e-3
+    assert np.allclose(fk(c.q_cmd)[:3, 3][:2] - start[:2], [0.0, 0.02], atol=2e-3)
+
+
+def test_jog_down_stops_at_the_floor_with_the_gripper():
+    c = TeleopCore(LIVE_Q)
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)
+    floor = _lowest_gripper_point(c) - 0.01
+    c = TeleopCore(c.q_cmd, limits=Limits(min_z=floor, gripper_length=0.17))
+    _jog_for(c, np.array([0.0, 0.0, 0.02]), seconds=3.0)  # A: along tool z, straight down
+    assert _lowest_gripper_point(c) > floor - 2e-3
+
+
+def test_floor_counts_the_elbow_and_wrist():
+    c = TeleopCore(LIVE_Q, limits=Limits(min_z=0.0, gripper_length=0.17))
+    assert c._body_low(LIVE_Q) <= min(f[2, 3] for f in _chain(LIVE_Q)[2:6])
+    # A floor just under the current lowest point: no step may go below it.
+    low = c._body_low(c.q_cmd)
+    c = TeleopCore(LIVE_Q, limits=Limits(min_z=low - 0.001, gripper_length=0.17))
+    run(c, ramp((0, 0, 0), (0, 0, -0.2), 2.0))
+    assert c._body_low(c.q_cmd) > low - 0.001 - 0.004
+
+
+def test_turning_tool_down_lifts_to_keep_the_fingertips_clear():
+    c = TeleopCore(LIVE_Q)
+    floor = _lowest_gripper_point(c) - 0.005
+    c = TeleopCore(LIVE_Q, limits=Limits(min_z=floor, gripper_length=0.17))
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)
+    assert _tool_z(c) @ DOWN > 0.999
+    assert _lowest_gripper_point(c) > floor - 3e-3

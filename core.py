@@ -159,6 +159,21 @@ def yaw_of(rotvec: np.ndarray) -> float:
     return 2 * np.arctan2(z, w)
 
 
+def gripper_points(length: float | None) -> np.ndarray:
+    """Points on the gripper in the flange (tool0) frame, used to keep it above the floor.
+
+    A box around the 2F-85 that does not depend on which way its fingers open: the
+    housing (15 cm square at the flange and 11 cm out) and the fingertip plane (12 cm
+    square at `length`, wider than the jaws at full opening). None: the flange centre only.
+    """
+    if not length:
+        return np.zeros((1, 3))
+    pts = [(0.0, 0.0, 0.0), (0.0, 0.0, length)]
+    for z, half in ((0.0, 0.075), (min(0.11, length), 0.075), (length, 0.06)):
+        pts += [(sx * half, sy * half, z) for sx in (-1, 1) for sy in (-1, 1)]
+    return np.array(pts)
+
+
 @dataclass
 class Limits:
     # Deliberately slow for first runs; raise only after testing.
@@ -168,7 +183,8 @@ class Limits:
     joint_limit: float = 2 * np.pi - 0.05  # rad; UR5e wrists can reach +/-2pi
     elbow_limit: float = np.pi - 0.05   # rad
     box_half_extent: float = 0.40       # m, around the TCP pose at startup
-    min_z: float | None = None          # m in the base frame; lowest allowed TCP height
+    min_z: float | None = None          # m in the base frame; nothing on the arm or gripper goes lower
+    gripper_length: float | None = None  # m from flange to fingertips; None: check the flange only
     max_controller_jump: float = 0.10   # m between frames: treated as a glitch
     max_controller_jump_rot: float = 0.60  # rad between frames
 
@@ -205,6 +221,8 @@ class TeleopCore:
         self._rotation = self.map.operator_to_base
         self.tool_down = False
         self._aligning = False
+        # Gripper points relative to the TCP, which sits tcp_z out along the flange's z.
+        self._grip_pts = gripper_points(self.lim.gripper_length) - np.array([0.0, 0.0, self.map.tcp_offset[2, 3]])
         self._was_click = False
 
     def click(self, pressed: bool) -> bool | None:
@@ -278,6 +296,8 @@ class TeleopCore:
 
         self.status = "engaged"  # _desired and _ik_step may replace this with why motion stopped
         self.target = self._limited_target(self._desired(ctrl), dt)
+        # The speed limit can leave the orientation short of the one _desired clipped for.
+        self.target[:3, 3] = self._clip_to_workspace(self.target[:3, 3], self.target[:3, :3], self._tcp0)
         self.q_cmd = self._ik_step(self.target, dt)
         return self.q_cmd
 
@@ -303,11 +323,12 @@ class TeleopCore:
         n = np.linalg.norm(velocity)
         if n > self.lim.max_linear_speed:
             velocity = velocity * self.lim.max_linear_speed / n
-        out[:3, 3] = self._clip_to_workspace(out[:3, 3] + velocity * dt, out[2, 3])
+        start = self.target
         yaw_rate = float(np.clip(yaw_rate, -self.lim.max_angular_speed, self.lim.max_angular_speed))
         out[:3, :3] = matrix_from_rotvec(np.array([0.0, 0.0, yaw_rate * dt])) @ R
         if self.tool_down:
             out = self._limited_rotation(out, pointing_down(out[:3, :3]), dt)
+        out[:3, 3] = self._clip_to_workspace(out[:3, 3] + velocity * dt, out[:3, :3], start)
         self.target = out
         self.q_cmd = self._ik_step(out, dt)
         return self.q_cmd
@@ -335,7 +356,7 @@ class TeleopCore:
             out[:3, :3] = matrix_from_rotvec(np.array([0.0, 0.0, yaw_of(turn)])) @ pointing_down(self._tcp0[:3, :3])
         else:
             out[:3, :3] = matrix_from_rotvec(turn) @ self._tcp0[:3, :3]
-        out[:3, 3] = self._clip_to_workspace(out[:3, 3], self._tcp0[2, 3])
+        out[:3, 3] = self._clip_to_workspace(out[:3, 3], out[:3, :3], self._tcp0)
         return out
 
     def _align(self, dt: float) -> np.ndarray:
@@ -348,16 +369,33 @@ class TeleopCore:
             self.status = "idle"
             return self.q_cmd
         self.status = "turning tool down"
+        start = self.target
         self.target = self._limited_rotation(self.target, goal, dt)
+        # Turning can swing the fingertips down; rise as needed to keep them off the floor.
+        self.target[:3, 3] = self._clip_to_workspace(self.target[:3, 3], self.target[:3, :3], start)
         self.q_cmd = self._ik_step(self.target, dt)
         return self.q_cmd
 
-    def _clip_to_workspace(self, position: np.ndarray, start_z: float) -> np.ndarray:
+    def _lowest(self, R: np.ndarray) -> float:
+        """Height of the gripper's lowest point relative to the TCP, for orientation R."""
+        return float(np.min(self._grip_pts @ R[2, :]))
+
+    def _body_low(self, q: np.ndarray) -> float:
+        """Lowest point of the arm (elbow and wrist joints) and gripper, for joints q."""
+        frames = _chain(q)
+        flange_pts = frames[6][:3, :3] @ (self._grip_pts + [0.0, 0.0, self.map.tcp_offset[2, 3]]).T
+        joints = min(f[2, 3] for f in frames[2:6])
+        return float(min(joints, np.min(flange_pts[2] + frames[6][2, 3])))
+
+    def _clip_to_workspace(self, position: np.ndarray, R: np.ndarray, start: np.ndarray) -> np.ndarray:
+        """Keep the TCP in the box, and every gripper point (for orientation R) above min_z."""
         half = self.lim.box_half_extent
         low, high = self.box_center - half, self.box_center + half
         if self.lim.min_z is not None:
-            # Motion starting below the floor may stay there; it must not lift by itself.
-            low[2] = max(low[2], min(self.lim.min_z, start_z))
+            # Motion starting below the floor may stay there; it must not go lower.
+            floor = min(self.lim.min_z, start[2, 3] + self._lowest(start[:3, :3]))
+            low[2] = max(low[2], floor - self._lowest(R))
+            high[2] = max(high[2], low[2])
         clipped = np.clip(position, low, high)
         if not np.array_equal(clipped, position):
             self.status = "workspace limit"
@@ -394,4 +432,11 @@ class TeleopCore:
             self.status = "joint limit"
             self.target = fk(self.q_cmd, off)
             return self.q_cmd
+        if self.lim.min_z is not None:
+            # The target keeps the gripper up; this catches the elbow and wrist too.
+            floor = min(self.lim.min_z, self._body_low(self.q_cmd))
+            if self._body_low(next_q) < floor - 0.003:
+                self.status = "floor limit"
+                self.target = fk(self.q_cmd, off)
+                return self.q_cmd
         return next_q

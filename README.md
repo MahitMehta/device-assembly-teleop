@@ -117,7 +117,7 @@ The stick, A/B and tool-down turning follow the same holds and limits, and clear
 Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
 +/-40 cm around the startup pose (`--box-half-extent`), at 0.10 m/s by default. The box does not know
-about the table or the robot's own base. `--min-z` is a floor for the TCP, 3 cm above the arm's base by default (`base` frame z = 0.03); without `--tcp-z` the TCP is the flange, so the fingertips can reach below it. These are software limits: they
+about the table or the robot's own base. `--min-z` is a floor, 3 cm above the arm's base by default (`base` frame z = 0.03): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
 do not replace the pendant's safety limits or the e-stop. The log shows `workspace limit` or
 `joint limit` when one of these is stopping motion.
 
