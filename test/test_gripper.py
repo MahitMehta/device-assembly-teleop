@@ -32,7 +32,9 @@ class FakeURCap:
             buf += data
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
-                conn.sendall((self._reply(line.decode().strip()) + "\n").encode())
+                reply = self._reply(line.decode().strip())
+                # Like the real URCap: GET replies end with a newline, SET's "ack" has none.
+                conn.sendall((reply if reply == "ack" else reply + "\n").encode())
 
     def _reply(self, line):
         self.lines.append(line)

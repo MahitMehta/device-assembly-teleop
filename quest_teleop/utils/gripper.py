@@ -46,8 +46,9 @@ class URCapGripper:
         if self._sock is None:
             raise GripperError("not connected")
         self._sock.sendall((line + "\n").encode())
+        # GET replies end with a newline; SET replies are a bare "ack" with none.
         data = b""
-        while not data.endswith(b"\n"):
+        while not (data.endswith(b"\n") or (line.startswith("SET") and data == b"ack")):
             chunk = self._sock.recv(256)
             if not chunk:
                 raise GripperError(f"socket closed during {line!r}")
