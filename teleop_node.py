@@ -411,7 +411,7 @@ def parse_args(argv=None):
     p.add_argument("--jog-speed", type=float, default=0.01, help="Stick forward/back speed at full deflection (m/s); A/B run at half of this")
     p.add_argument("--jog-yaw-speed", type=float, default=0.3, help="Stick turning speed at full deflection (rad/s)")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
-    p.add_argument("--min-z", type=float, default=None, help="Lowest TCP height in the base frame (m), e.g. just above the table")
+    p.add_argument("--min-z", type=float, default=0.03, help="Lowest TCP height in the base frame (m): 3 cm above the arm's base by default. Without --tcp-z the TCP is the flange, not the fingertips")
     p.add_argument("--gripper-open", type=float, default=None, help="Jaw gap when open (m); 0.085 for the 2F-85")
     p.add_argument("--gripper-closed", type=float, default=None, help="Jaw gap when closed (m); 0 for the 2F-85")
     p.add_argument("--gripper-effort", type=float, default=50.0, help="Grip force (N); the 2F-85 range is 20-235")
