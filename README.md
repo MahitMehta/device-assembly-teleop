@@ -72,10 +72,8 @@ cp .example.env .env    # once: IPs and ROS domain; edit SENDER_IP if the headse
 git pull                # after each push from the Mac
 ```
 
-1. **Start the driver** (first shell). Only one driver can control the arm, so stop any other
-   driver connected to it first. The driver runs headless: it sends its own program to the arm, so
-   put the pendant in **Remote Control** mode; the pendant's installation is not changed. It starts
-   in `forward_position_controller`, the controller teleop commands, so there is nothing to switch.
+1. **Start the driver** The driver runs headless: it sends its own program to the arm, so
+   put the pendant in **Remote Control** mode; the pendant's installation is not changed. 
    ```bash
    docker compose run --rm driver
    ```
@@ -88,6 +86,10 @@ git pull                # after each push from the Mac
    ```
 3. **Before going live:** move the arm to a central pose away from wrist limits, set reduced speed
    limits on the pendant, have someone at the e-stop, and make sure the gripper is activated.
+   Zero the force sensor with nothing touching the gripper, so the force limits measure from 0:
+   ```bash
+   docker compose run --rm ros ros2 service call /io_and_status_controller/zero_ftsensor std_srvs/srv/Trigger
+   ```
 4. **Go live.** Extra arguments go straight to `teleop_node`:
    ```bash
    docker compose run --rm teleop --live
@@ -106,6 +108,14 @@ git pull                # after each push from the Mac
 For anything else, `docker compose run --rm ros <command>` runs it with ROS sourced, e.g.
 `docker compose run --rm ros ros2 topic list`, or with no command for a shell.
 
+To follow a running service's output from another shell (`docker compose logs` skips `run`
+containers), e.g. the teleop node or the driver:
+
+```bash
+docker logs -f $(docker ps -q --filter name=teleop-run)
+docker logs -f $(docker ps -q --filter name=driver-run)
+```
+
 ## Safety behaviour
 
 The node refuses `--live` unless `forward_position_controller` is active with the expected joint order.
@@ -120,8 +130,8 @@ The stick, A/B and tool-down turning follow the same holds and limits, and clear
 
 Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
-+/-40 cm around the startup pose (`--box-half-extent`), at 0.15 m/s by default (`--max-linear-speed`). The box does not know
-about the table or the robot's own base. `--min-z` is a floor, 3 cm above the arm's base by default (`base` frame z = 0.03): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
++/-40 cm around the startup pose (`--box-half-extent`), at 0.20 m/s and 0.625 rad/s by default (`--max-linear-speed`, `--max-angular-speed`). The box does not know
+about the table or the robot's own base. `--min-z` is a floor, 1 cm above the arm's base by default (`base` frame z = 0.01): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
 do not replace the pendant's safety limits or the e-stop. The log shows `workspace limit` or
 `joint limit` when one of these is stopping motion.
 
