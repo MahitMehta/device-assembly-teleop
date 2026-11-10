@@ -95,7 +95,7 @@ git pull                # after each push from the Mac
    Pull the trigger (past halfway) to close the gripper, release it to open. The node drives the
    gripper itself through the Robotiq URCap socket on the UR controller (`--gripper-ip`, port
    63352, gripper `--gripper-sid 3`). `--gripper-speed` and `--gripper-force` are the Robotiq
-   registers (0-255) and both default to 0: slowest, and Low Force mode with Secure Grip off. The
+   registers (0-255). Speed defaults to 50; force defaults to 0, Low Force mode with Secure Grip off. The
    node sends nothing to the gripper until the trigger is first pulled, never activates it
    (activation moves the fingers: do it from the pendant), and `--no-gripper` leaves it alone.
 5. **Record** from a third shell: `docker compose run --rm record <task_name>`. Ctrl-C ends the
@@ -120,7 +120,7 @@ The stick, A/B and tool-down turning follow the same holds and limits, and clear
 
 Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
-+/-40 cm around the startup pose (`--box-half-extent`), at 0.10 m/s by default. The box does not know
++/-40 cm around the startup pose (`--box-half-extent`), at 0.15 m/s by default (`--max-linear-speed`). The box does not know
 about the table or the robot's own base. `--min-z` is a floor, 3 cm above the arm's base by default (`base` frame z = 0.03): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
 do not replace the pendant's safety limits or the e-stop. The log shows `workspace limit` or
 `joint limit` when one of these is stopping motion.
