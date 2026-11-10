@@ -1,6 +1,6 @@
 # UR5e Quest 3 teleop
 
-Hold the right grip to move the arm; pull the right trigger to close the gripper and release it to open. For fine motion, release the grip: stick up/down drives the gripper forward/back, level, along the way it faces (tool +y, flattened onto the table); stick left/right turns it about vertical through the TCP (right = clockwise from above); A/B move it toward and away from the fingertips along its z axis. Speeds: `--jog-speed` (1 cm/s at full stick, A/B at half that) and `--jog-yaw-speed` (0.3 rad/s at full stick). Click the stick to toggle **tool-down mode**: the arm turns the gripper to point straight down at the table by itself (at `--max-angular-speed`, in place, keeping its yaw) and keeps it there. While gripping, hand tilt is ignored but twisting your hand still turns the gripper about vertical. It turns only while the controller is tracked and the link is live, and any hold turns the mode off so it never resumes by itself. `--tool-down` starts with it on, so the arm turns down as soon as the node starts. Commands go through the
+Hold the right grip to move the arm; pull the right trigger to close the gripper and release it to open. For fine motion, release the grip: stick up/down drives the gripper forward/back, level, along the way it faces (tool +y, flattened onto the table); stick left/right turns it about vertical through the TCP (right = clockwise from above); A/B move it toward and away from the fingertips along its z axis. Speeds: `--jog-speed` (1 cm/s at full stick, A/B at half that) and `--jog-yaw-speed` (0.5 rad/s at full stick). Click the stick to toggle **tool-down mode**: the arm turns the gripper to point straight down at the table by itself (at `--max-angular-speed`, in place, keeping its yaw) and keeps it there. While gripping, hand tilt is ignored but twisting your hand still turns the gripper about vertical. It turns only while the controller is tracked and the link is live, and any hold turns the mode off so it never resumes by itself. `--tool-down` starts with it on, so the arm turns down as soon as the node starts. Commands go through the
 `ur_robot_driver` already running on `coral`. Do not use `ur_rtde` control alongside it, because it
 replaces the driver's program on the arm.
 
@@ -21,7 +21,7 @@ Python code runs as `python3 -m quest_teleop...` from this folder, with no build
 | `Dockerfile` | The image those services run in: `ros:humble-ros-base` plus `ur_robot_driver`, Cyclone DDS and numpy. Built on first use; the code is mounted, so rebuild (`docker compose build`) only when dependencies change |
 | `scripts/record.sh` | Records a demonstration to a rosbag |
 | `scripts/ros.sh` | Container entrypoint: sources ROS 2, then runs the command |
-| `headset/quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough, stick click) |
+| `headset/quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough, stick click, highest display refresh rate) |
 | `test/` | Unit tests: `.venv/bin/python -m pytest -q` (settings in `pytest.ini`) |
 
 ## Run
@@ -130,7 +130,7 @@ The stick, A/B and tool-down turning follow the same holds and limits, and clear
 
 Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
-+/-40 cm around the startup pose (`--box-half-extent`), at 0.20 m/s and 0.625 rad/s by default (`--max-linear-speed`, `--max-angular-speed`). The box does not know
++/-40 cm around the startup pose (`--box-half-extent`), at 0.20 m/s and 1.0 rad/s by default (`--max-linear-speed`, `--max-angular-speed`). The box does not know
 about the table or the robot's own base. `--min-z` is a floor, 1 cm above the arm's base by default (`base` frame z = 0.01): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
 do not replace the pendant's safety limits or the e-stop. The log shows `workspace limit` or
 `joint limit` when one of these is stopping motion.

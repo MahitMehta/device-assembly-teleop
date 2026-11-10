@@ -63,7 +63,7 @@ index 21e15eb..4621c11 100644
                      std::to_string(frame_.RightRemoteJoystick.y) + ",";
              text += "rightTrig " + std::to_string(frame_.RightRemoteIndexTrigger) + ",";
 diff --git a/app/src/main.cpp b/app/src/main.cpp
-index e934c1e..8455655 100755
+index e934c1e..7bb44d0 100755
 --- a/app/src/main.cpp
 +++ b/app/src/main.cpp
 @@ -56,9 +56,20 @@ PFN_xrGetDeviceSampleRateFB xrGetDeviceSampleRateFB = nullptr;
@@ -88,15 +88,16 @@ index e934c1e..8455655 100755
          OpenXRVersion = XR_API_VERSION_1_1;
      }
  
-@@ -103,6 +114,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -103,6 +114,8 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          std::vector<const char*> extensions = XrApp::GetExtensions();
          extensions.push_back(XR_FB_HAPTIC_AMPLITUDE_ENVELOPE_EXTENSION_NAME);
          extensions.push_back(XR_FB_HAPTIC_PCM_EXTENSION_NAME);
 +        extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
++        extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
                  return extensions;
      }
  
-@@ -224,6 +236,15 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -224,6 +237,15 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
              2,
              handSubactionPaths);
  
@@ -112,7 +113,7 @@ index e934c1e..8455655 100755
          // Squeeze Value
          squeezeValueAction_ = CreateAction(
              BaseActionSet,
-@@ -319,6 +340,12 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -319,6 +341,12 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          baseTouchBindings.emplace_back(
              ActionSuggestedBinding(triggerTouchAction_, "/user/hand/right/input/trigger/touch"));
  
@@ -125,18 +126,45 @@ index e934c1e..8455655 100755
          // Trigger Proximity
          baseTouchBindings.emplace_back(ActionSuggestedBinding(
              triggerProxAction_, "/user/hand/left/input/trigger/proximity"));
-@@ -784,6 +811,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -784,6 +812,8 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
      virtual bool SessionInit() override {
          /// Use LocalSpace instead of Stage Space.
          CurrentSpace = LocalSpace;
 +        InitPassthrough();
++        RequestMaxRefreshRate();
          /// Init session bound objects
          if (false == controllerRenderL_.Init(true)) {
              ALOG("AppInit::Init L controller renderer FAILED.");
-@@ -801,7 +829,53 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -801,7 +831,79 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          return true;
      }
  
++    // Poses are logged once per frame, so a higher display rate means more frequent,
++    // fresher controller updates for teleop. Ask for the highest rate the headset offers.
++    void RequestMaxRefreshRate() {
++        PFN_xrEnumerateDisplayRefreshRatesFB pfnEnumerate = nullptr;
++        PFN_xrRequestDisplayRefreshRateFB pfnRequest = nullptr;
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrEnumerateDisplayRefreshRatesFB", (PFN_xrVoidFunction*)&pfnEnumerate));
++        OXR(xrGetInstanceProcAddr(GetInstance(), "xrRequestDisplayRefreshRateFB", (PFN_xrVoidFunction*)&pfnRequest));
++        if (!pfnEnumerate || !pfnRequest) {
++            ALOG("Display refresh rate functions unavailable");
++            return;
++        }
++        uint32_t count = 0;
++        if (XR_FAILED(pfnEnumerate(GetSession(), 0, &count, nullptr)) || count == 0) {
++            ALOG("xrEnumerateDisplayRefreshRatesFB failed");
++            return;
++        }
++        std::vector<float> rates(count);
++        pfnEnumerate(GetSession(), count, &count, rates.data());
++        const float best = *std::max_element(rates.begin(), rates.end());
++        if (XR_FAILED(pfnRequest(GetSession(), best))) {
++            ALOG("xrRequestDisplayRefreshRateFB(%.0f) failed", best);
++            return;
++        }
++        ALOG("Display refresh rate set to %.0f Hz", best);
++    }
++
 +    void InitPassthrough() {
 +        OXR(xrGetInstanceProcAddr(GetInstance(), "xrCreatePassthroughFB", (PFN_xrVoidFunction*)&pfnCreatePassthrough_));
 +        OXR(xrGetInstanceProcAddr(GetInstance(), "xrDestroyPassthroughFB", (PFN_xrVoidFunction*)&pfnDestroyPassthrough_));
@@ -187,7 +215,7 @@ index e934c1e..8455655 100755
          controllerRenderL_.Shutdown();
          controllerRenderR_.Shutdown();
          beamRenderer_.Shutdown();
-@@ -843,6 +917,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -843,6 +945,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
              /// Trigger Touch
              triggerTouchL_ = GetActionStateBoolean(triggerTouchAction_, LeftHandPath).currentState;
              triggerTouchR_ = GetActionStateBoolean(triggerTouchAction_, RightHandPath).currentState;
@@ -195,7 +223,7 @@ index e934c1e..8455655 100755
              /// Squeeze Value
              squeezeValueL_ = GetActionStateBoolean(squeezeValueAction_, LeftHandPath).currentState;
              squeezeValueR_ = GetActionStateBoolean(squeezeValueAction_, RightHandPath).currentState;
-@@ -1099,7 +1174,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1099,7 +1202,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          bool bB = buttonB.currentState == XR_TRUE;
          bool bX = buttonX.currentState == XR_TRUE;
          bool bY = buttonY.currentState == XR_TRUE;
@@ -204,7 +232,7 @@ index e934c1e..8455655 100755
          auto remotes_str = remotes_to_string(remoteState, in);
          __android_log_print(ANDROID_LOG_INFO, "wE9ryARX", "%s",
                              remotes_str.c_str());
-@@ -1117,8 +1192,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1117,8 +1220,7 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
  
      // Render eye buffers while running
      virtual void Render(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override {
@@ -214,7 +242,7 @@ index e934c1e..8455655 100755
          /// Render controllers
          if (in.LeftRemoteTracked) {
              controllerRenderL_.Render(out.Surfaces);
-@@ -1126,9 +1200,6 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1126,9 +1228,6 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
          if (in.RightRemoteTracked) {
              controllerRenderR_.Render(out.Surfaces);
          }
@@ -224,7 +252,7 @@ index e934c1e..8455655 100755
      }
  
      void EnumerateActions() {
-@@ -1378,6 +1449,10 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
+@@ -1378,6 +1477,10 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
      XrAction triggerTouchAction_ = XR_NULL_HANDLE;
      bool triggerTouchL_ = false;
      bool triggerTouchR_ = false;
