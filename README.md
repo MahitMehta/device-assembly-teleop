@@ -4,8 +4,8 @@ Hold the right grip to move the arm; pull the right trigger to close the gripper
 `ur_robot_driver` already running on `coral`. Do not use `ur_rtde` control alongside it, because it
 replaces the driver's program on the arm.
 
-A ROS 2 `ament_python` package (`quest_teleop`). Run everything from this folder with
-`python3 -m ...`; no `colcon build` is needed.
+On `coral` everything runs through `compose.yaml` (`docker compose run --rm <service>`); the
+Python code runs as `python3 -m quest_teleop...` from this folder, with no build step.
 
 | Path | Purpose |
 |---|---|
@@ -16,10 +16,12 @@ A ROS 2 `ament_python` package (`quest_teleop`). Run everything from this folder
 | `quest_teleop/utils/quest_link.py` | Packet format and the sender allowlist |
 | `quest_teleop/tools/quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
 | `quest_teleop/tools/check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
+| `compose.yaml` | `coral` services: `teleop`, `record`, `controller`, `ros` |
 | `scripts/record.sh` | Records a demonstration to a rosbag |
+| `scripts/switch_controller.sh` | Switches to the teleop controller and back |
+| `scripts/ros.sh` | Container entrypoint: sources ROS 2, then runs the command |
 | `headset/quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough, stick click) |
-| `test/` | Unit tests: `.venv/bin/python -m pytest -q` |
-| `package.xml`, `setup.py`, `setup.cfg` | ROS 2 package metadata |
+| `test/` | Unit tests: `.venv/bin/python -m pytest -q` (settings in `pytest.ini`) |
 
 ## Run
 
@@ -59,47 +61,38 @@ Then keep the sender running (`100.89.37.109` is `coral`'s Tailscale IP):
 .venv/bin/python -m quest_teleop.tools.quest_sender --to 100.89.37.109
 ```
 
-**On `coral`**, get the code with git, then start a container on the robot's ROS domain from that
-folder:
+**On `coral`**, get the code with git and run everything from that folder with Docker Compose.
+Each command runs once in the foreground (Ctrl-C stops it); nothing starts or restarts by itself.
 
 ```bash
 git clone https://github.com/MahitMehta/device-assembly-teleop.git    # once
 git pull    # in that folder, after each push from the Mac
-docker run --rm -it --network host \
-  -e ROS_DOMAIN_ID=66 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-  -v "$PWD":/teleop -v /data:/data -w /teleop manip-ros2-bridge:latest bash
-source /opt/ros/humble/setup.bash
 ```
 
-Every `teleop_node` command below also needs these two flags, where `100.89.37.109` is `coral`'s
-Tailscale IP and `<VR_HEADSET_HOST_IP>` is the Tailscale IP of the computer the headset is plugged
-into (`tailscale ip -4` on that computer):
-
-```bash
---udp-bind 100.89.37.109 --udp-from <VR_HEADSET_HOST_IP>
-```
+`compose.yaml` passes `--udp-bind 100.89.37.109 --udp-from 100.107.32.64` (`coral`'s Tailscale IP,
+and the Tailscale IP of the computer the headset is plugged into). If the headset is on another
+computer, set `SENDER_IP` (`tailscale ip -4` on that computer), e.g.
+`SENDER_IP=100.x.y.z docker compose run --rm teleop`.
 
 1. **Dry-run (default, sends nothing to the arm or gripper).** Hold grip, push your hand away from
-   the headset, and check the logged x/y/z offsets move in the robot's forward direction.
+   the headset, and check the logged offsets move in the robot's forward direction.
    `--robot-forward-yaw-deg` is that direction in degrees from base +x. It defaults to 180 (base -x),
-   measured for this setup; change it only if the arm or workspace moves. It does not change when you
-   turn or move around.
+   measured for this setup; change it only if the arm or workspace moves.
    ```bash
-   python3 -m quest_teleop.nodes.teleop_node --robot-forward-yaw-deg 180
+   docker compose run --rm teleop
    ```
 2. **Before going live:**
    - Confirm nobody else is using the arm. Switching controllers interrupts their work.
    - Move the arm to a central pose, away from wrist limits.
    - Set reduced speed limits on the pendant, and have someone at the e-stop.
-   - Confirm `speed_scaling` is above 0, with the External Control program running.
-   - Activate the controller:
+   - Confirm the External Control program is running and the gripper is activated.
+   - Switch to the teleop controller:
    ```bash
-   ros2 service call /controller_manager/switch_controller controller_manager_msgs/srv/SwitchController \
-     "{activate_controllers: [forward_position_controller], deactivate_controllers: [scaled_joint_trajectory_controller], strictness: 2, timeout: {sec: 2}}"
+   docker compose run --rm controller teleop
    ```
-3. **Go live.**
+3. **Go live.** Extra arguments go straight to `teleop_node`:
    ```bash
-   python3 -m quest_teleop.nodes.teleop_node --live --robot-forward-yaw-deg 180
+   docker compose run --rm teleop --live
    ```
    Pull the trigger (past halfway) to close the gripper, release it to open. The node drives the
    gripper itself through the Robotiq URCap socket on the UR controller (`--gripper-ip`, port
@@ -108,8 +101,12 @@ into (`tailscale ip -4` on that computer):
    slowest, and Low Force mode with Secure Grip off. The node sends nothing to the gripper until
    the trigger is first pulled, never activates it (activation moves the fingers: do it from the
    pendant), and `--no-gripper` leaves it alone entirely.
-4. **Record** from a second shell: `./scripts/record.sh <task_name>`. Ctrl-C ends the demonstration.
-5. **Restore** the previous controller when finished, by reversing the switch in step 2.
+4. **Record** from a second shell: `docker compose run --rm record <task_name>`. Ctrl-C ends the
+   demonstration.
+5. **Restore** the previous controller when finished: `docker compose run --rm controller restore`.
+
+For anything else, `docker compose run --rm ros <command>` runs it with ROS sourced, e.g.
+`docker compose run --rm ros ros2 topic list`, or with no command for a shell.
 
 ## Safety behaviour
 
@@ -135,8 +132,8 @@ do not replace the pendant's safety limits or the e-stop. The log shows `workspa
 Use a domain other than 66 so nothing can reach the robot:
 
 ```bash
-ROS_DOMAIN_ID=199 python3 -m quest_teleop.nodes.fake_robot --duration 11 &
-ROS_DOMAIN_ID=199 python3 -m quest_teleop.nodes.teleop_node --fake-source --live
+ROS_DOMAIN_ID=199 docker compose run --rm ros python3 -m quest_teleop.nodes.fake_robot --duration 11
+ROS_DOMAIN_ID=199 docker compose run --rm teleop --fake-source --live --no-gripper   # second shell, within ~1 s
 ```
 
 Add `--fake-jog` to exercise the stick and A/B instead of the grip. To test the network link without a

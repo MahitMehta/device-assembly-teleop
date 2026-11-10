@@ -1,0 +1,44 @@
+# Run on coral from this folder, one command at a time, in the foreground:
+#   docker compose run --rm controller teleop      # switch to forward_position_controller
+#   docker compose run --rm teleop                 # dry-run (sends nothing to the arm)
+#   docker compose run --rm teleop --live          # extra args go to teleop_node
+#   docker compose run --rm record <task_name>     # from a second shell
+#   docker compose run --rm controller restore     # switch back when done
+#   docker compose run --rm ros <any command>      # e.g. ros2 topic list
+# Nothing starts by itself and nothing restarts: every service is behind the `manual`
+# profile, so a bare `docker compose up` does nothing.
+
+x-ros: &ros
+  image: manip-ros2-bridge:latest
+  network_mode: host
+  init: true                       # pass Ctrl-C through to the node
+  working_dir: /teleop
+  volumes:
+    - .:/teleop
+    - /data:/data
+  environment:
+    ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-66}
+    RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+    PYTHONDONTWRITEBYTECODE: "1"   # no root-owned __pycache__ in the checkout
+  profiles: [manual]
+
+services:
+  teleop:
+    <<: *ros
+    # coral's Tailscale IP, and the IP of the computer the headset is plugged into
+    entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.teleop_node,
+                 --udp-bind, "${CORAL_IP:-100.89.37.109}", --udp-from, "${SENDER_IP:-100.107.32.64}"]
+    command: []
+
+  record:
+    <<: *ros
+    entrypoint: [scripts/ros.sh, scripts/record.sh]
+
+  controller:
+    <<: *ros
+    entrypoint: [scripts/ros.sh, scripts/switch_controller.sh]
+
+  ros:
+    <<: *ros
+    entrypoint: [scripts/ros.sh]
+    command: [bash]

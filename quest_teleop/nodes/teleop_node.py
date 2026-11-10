@@ -384,10 +384,10 @@ def main(argv=None) -> int:
     rclpy.init()
     if bool(args.udp_bind) != bool(args.udp_from):
         raise SystemExit("--udp-bind and --udp-from must be used together")
-    if args.udp_bind:
-        source = UdpSource(args.udp_bind, args.udp_from, args.udp_port)
-    elif args.fake_source:
+    if args.fake_source:  # wins over --udp-*, which compose.yaml always passes
         source = FakeSource(args.fake_amplitude, args.fake_jog)
+    elif args.udp_bind:
+        source = UdpSource(args.udp_bind, args.udp_from, args.udp_port)
     else:
         source = QuestSource(args.quest_ip)
     node = TeleopNode(args, source)
