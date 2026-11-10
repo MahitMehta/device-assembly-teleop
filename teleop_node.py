@@ -103,6 +103,7 @@ class TeleopNode(Node):
         self.last_grip_time = 0.0
         self.grip_busy_since = None
         self.grip_warned = False
+        self.grip_result = None   # (gap m, force N the server used, holding an object)
         self.last_log = 0.0
         self.mapping = Mapping(
             robot_forward_yaw=math.radians(args.robot_forward_yaw_deg),
@@ -296,7 +297,13 @@ class TeleopNode(Node):
             self.grip_busy_since = None
 
     def _on_grip_result(self, future) -> None:
-        self.grip_pos_pub.publish(Float64(data=future.result().result.position))
+        r = future.result().result
+        self.grip_pos_pub.publish(Float64(data=r.position))
+        result = (r.position, r.effort, bool(r.stalled))
+        if result[2] and (self.grip_result is None or not self.grip_result[2]):
+            # The server reports the force it set, so this shows --gripper-effort arriving.
+            self.get_logger().info(f"Gripper holding an object at {r.position * 1000:.0f} mm, force set to {r.effort:.0f} N")
+        self.grip_result = result
         self.grip_busy_since = None
 
     def _readout(self) -> str:
