@@ -1,0 +1,10 @@
+{
+    "[python]": {
+        "editor.formatOnSave": true, // Automatically format Python code when saving
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit", // Automatically fix linting issues on save
+            "source.organizeImports": "explicit" // Automatically organize and sort imports on save
+        },
+        "editor.defaultFormatter": "charliermarsh.ruff" // Use Ruff as the default Python formatter
+    },
+}
