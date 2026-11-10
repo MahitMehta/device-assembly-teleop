@@ -318,6 +318,10 @@ class TeleopNode(Node):
                 out += f" change={np.linalg.norm(self.force - self.force_baseline):.0f}N"
         if self.grip_pos is not None:
             out += f" gripper={self.grip_pos * 1000:.0f}mm"
+        if self.grip_result is not None:
+            gap, force, holding = self.grip_result
+            # From the gripper server's last reply: the force it set, and where the jaws stopped.
+            out += f" grip: {force:.0f}N set, jaws at {gap * 1000:.0f}mm{' on object' if holding else ''}"
         return out
 
     def _publish_state(self, engaged: bool, status: str) -> None:
