@@ -14,7 +14,7 @@ index c2b636f..331f062 100755
    <application
        android:allowBackup="false"
 diff --git a/app/src/Remotes.h b/app/src/Remotes.h
-index 21e15eb..4533cb6 100644
+index 21e15eb..4621c11 100644
 --- a/app/src/Remotes.h
 +++ b/app/src/Remotes.h
 @@ -16,8 +16,10 @@ struct RemoteState {
@@ -28,7 +28,7 @@ index 21e15eb..4533cb6 100644
  };
  
  std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatrix) {
-@@ -29,6 +31,12 @@ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatr
+@@ -29,16 +31,22 @@ std::string TransformationMatrixToString(const OVR::Matrix4f& transformationMatr
  
  std::string remotes_to_string(const RemoteState& state_, const OVRFW::ovrApplFrameIn& frame_) {
          std::string text;
@@ -40,7 +40,19 @@ index 21e15eb..4533cb6 100644
 +        }
          // right hand
          bool both_tracked = frame_.RightRemoteTracked && frame_.LeftRemoteTracked;
-         if (frame_.RightRemoteTracked) {
+-        if (frame_.RightRemoteTracked) {
++        if (frame_.LeftRemoteTracked) {
+             text += "l:";
+             text += TransformationMatrixToString(state_.LeftRemoteTransform);
+         }
+         if (both_tracked) {
+             text += "|";
+         }
+-        if (frame_.LeftRemoteTracked) {
++        if (frame_.RightRemoteTracked) {
+             text += "r:";
+             text += TransformationMatrixToString(state_.RightRemoteTransform);
+         }
 @@ -55,6 +63,8 @@ std::string remotes_to_string(const RemoteState& state_, const OVRFW::ovrApplFra
                  text += "RG,";
              if (state_.triggerTouchR_)
