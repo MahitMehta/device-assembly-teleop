@@ -19,11 +19,9 @@ import time
 
 import numpy as np
 import rclpy
-from control_msgs.action import GripperCommand
 from controller_manager_msgs.srv import ListControllers
 from geometry_msgs.msg import PoseStamped, WrenchStamped
 from rcl_interfaces.srv import GetParameters
-from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -34,6 +32,7 @@ from ur_dashboard_msgs.msg import RobotMode, SafetyMode
 
 from quest_link import DEFAULT_PORT, NO_JOG, UdpSource, quest_sample
 from core import JOINT_NAMES, Limits, Mapping, TeleopCore, jog_velocity
+from gripper import STROKE_M, GripperWorker, URCapGripper
 
 ROBOT_RUNNING, SAFETY_NORMAL = 7, 1
 JOINT_STALE_S = 0.05
@@ -42,7 +41,6 @@ MAX_TRACKING_ERROR = 0.10   # rad between commanded and measured joints
 CONTROLLER = "forward_position_controller"
 TRIGGER_CLOSE = 0.5         # trigger depth that closes the gripper
 TRIGGER_OPEN = 0.3          # ...and below which it opens again
-GRIP_GOAL_TIMEOUT_S = 6.0   # the server gives up on a move after 5 s
 
 
 class QuestSource:
@@ -100,10 +98,6 @@ class TeleopNode(Node):
         self.was_moving = False
         self.jog_v = None
         self.grip_closed = None   # wanted state from the trigger; None until first pulled
-        self.grip_sent = None     # state last sent to the gripper server
-        self.grip_busy_since = None
-        self.grip_warned = False
-        self.grip_result = None   # (gap m, force N the server used, holding an object)
         self.last_log = 0.0
         self.mapping = Mapping(
             robot_forward_yaw=math.radians(args.robot_forward_yaw_deg),
@@ -122,7 +116,7 @@ class TeleopNode(Node):
 
         # Separate groups so a slow tick or gripper reply never delays the joint and force
         # readings (one shared group runs every callback in turn).
-        sensors, control, gripper = (MutuallyExclusiveCallbackGroup() for _ in range(3))
+        sensors, control = MutuallyExclusiveCallbackGroup(), MutuallyExclusiveCallbackGroup()
         self.create_subscription(JointState, "/joint_states", self._on_joints, qos_profile_sensor_data, callback_group=sensors)
         # The driver publishes these only on change, so a late subscriber needs the latched value.
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -137,7 +131,11 @@ class TeleopNode(Node):
         self.status_pub = self.create_publisher(String, "/teleop/status", 10)
         self.grip_cmd_pub = self.create_publisher(Float64, "/teleop/gripper_command", 10)
         self.grip_pos_pub = self.create_publisher(Float64, "/teleop/gripper_position", 10)
-        self.grip_client = ActionClient(self, GripperCommand, "/gripper/gripper_cmd", callback_group=gripper) if args.live else None
+        # Our own gripper connection (gripper.py), only when live: dry-run sends nothing.
+        self.gripper = None
+        if args.live and not args.no_gripper:
+            self.gripper = GripperWorker(URCapGripper(args.gripper_ip, sid=args.gripper_sid),
+                                         args.gripper_speed, args.gripper_force, self.get_logger())
 
         self.timer = self.create_timer(1.0 / args.rate, self._tick, callback_group=control)
 
@@ -248,9 +246,8 @@ class TeleopNode(Node):
         self._publish_state(moving, self.core.status)
 
     def _send_gripper(self, trigger: float | None) -> None:
-        """Trigger pulled = close, released = open. One goal per change."""
-        opened, closed = self.args.gripper_open, self.args.gripper_closed
-        if trigger is None or opened is None or closed is None:
+        """Trigger pulled = close, released = open."""
+        if trigger is None:
             return
         # Two thresholds so a trigger resting near one of them doesn't flicker the gripper.
         want = trigger > TRIGGER_OPEN if self.grip_closed else trigger >= TRIGGER_CLOSE
@@ -258,46 +255,12 @@ class TeleopNode(Node):
             # Leave the gripper alone until the trigger is first pulled: commanding "open"
             # at startup would drop anything it is holding.
             return
+        if want == self.grip_closed:
+            return
         self.grip_closed = want
-        if want == self.grip_sent:
-            return
-        now = time.monotonic()
-        # The server runs one blocking move at a time; send the change once it is free.
-        if self.grip_busy_since is not None and now - self.grip_busy_since < GRIP_GOAL_TIMEOUT_S:
-            return
-        pos = closed if want else opened
-        self.grip_sent = want
-        self.grip_cmd_pub.publish(Float64(data=pos))
-        if self.grip_client is None:
-            return
-        if not self.grip_client.server_is_ready():
-            if not self.grip_warned:
-                self.grip_warned = True
-                self.get_logger().warning("Gripper server not available: gripper commands are not reaching it")
-            self.grip_sent = None  # try again next tick
-            return
-        goal = GripperCommand.Goal()
-        goal.command.position = pos
-        goal.command.max_effort = self.args.gripper_effort
-        self.grip_busy_since = now
-        self.grip_client.send_goal_async(goal).add_done_callback(self._on_grip_accepted)
-
-    def _on_grip_accepted(self, future) -> None:
-        handle = future.result()
-        if handle.accepted:
-            handle.get_result_async().add_done_callback(self._on_grip_result)
-        else:
-            self.grip_busy_since = None
-
-    def _on_grip_result(self, future) -> None:
-        r = future.result().result
-        self.grip_pos_pub.publish(Float64(data=r.position))
-        result = (r.position, r.effort, bool(r.stalled))
-        if result[2] and (self.grip_result is None or not self.grip_result[2]):
-            # The server reports the force it set, so this shows --gripper-effort arriving.
-            self.get_logger().info(f"Gripper holding an object at {r.position * 1000:.0f} mm, force set to {r.effort:.0f} N")
-        self.grip_result = result
-        self.grip_busy_since = None
+        self.grip_cmd_pub.publish(Float64(data=0.0 if want else STROKE_M))
+        if self.gripper is not None:
+            self.gripper.command(want)
 
     def _readout(self) -> str:
         """Force and gripper values for the log, to compare against the limits."""
@@ -311,14 +274,17 @@ class TeleopNode(Node):
                 out += f" change={np.linalg.norm(self.force - self.force_baseline):.0f}N"
         if self.grip_closed is not None:
             out += f" gripper={'closed' if self.grip_closed else 'open'}"
-        if self.grip_result is not None:
-            gap, force, holding = self.grip_result
-            # From the gripper server's last reply: the force it set, and where the jaws stopped.
-            out += f" grip: {force:.0f}N set, jaws at {gap * 1000:.0f}mm{' on object' if holding else ''}"
+        state = self.gripper.state if self.gripper is not None else None
+        if state is not None:
+            gap, holding = state
+            out += f" jaws at {gap * 1000:.0f}mm{' on object' if holding else ''}"
         return out
 
     def _publish_state(self, engaged: bool, status: str) -> None:
         self.engaged_pub.publish(Bool(data=bool(engaged)))
+        state = self.gripper.state if self.gripper is not None else None
+        if state is not None:
+            self.grip_pos_pub.publish(Float64(data=state[0]))
         self.status_pub.publish(String(data=status))
         T = self.core.target
         msg = PoseStamped()
@@ -405,9 +371,11 @@ def parse_args(argv=None):
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.03, help="Floor in the base frame (m), 3 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")
     p.add_argument("--gripper-length", type=float, default=0.17, help="Flange to fingertips (m), for the floor check; a little over the 2F-85 with its coupling")
-    p.add_argument("--gripper-open", type=float, default=None, help="Jaw gap when open (m); 0.085 for the 2F-85")
-    p.add_argument("--gripper-closed", type=float, default=None, help="Jaw gap when closed (m); 0 for the 2F-85")
-    p.add_argument("--gripper-effort", type=float, default=50.0, help="Grip force (N); the 2F-85 range is 20-235")
+    p.add_argument("--gripper-ip", default="10.168.4.208", help="UR controller running the Robotiq URCap (socket port 63352)")
+    p.add_argument("--gripper-sid", type=int, default=3, help="Gripper ID on the URCap socket ('GET SID' lists them)")
+    p.add_argument("--gripper-speed", type=int, default=0, help="Robotiq speed register, 0 (slowest) to 255")
+    p.add_argument("--gripper-force", type=int, default=0, help="Robotiq force register, 0 (Low Force mode, Secure Grip off) to 255")
+    p.add_argument("--no-gripper", action="store_true", help="Never connect to or command the gripper")
     return p.parse_args(argv)
 
 
@@ -431,6 +399,8 @@ def main(argv=None) -> int:
             node.destroy_node()
             rclpy.shutdown()
             return 1
+    if node.gripper is not None:
+        node.gripper.start()
     node.timer.reset()
     executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
@@ -439,6 +409,8 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if node.gripper is not None:
+            node.gripper.stop()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

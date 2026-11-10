@@ -8,13 +8,14 @@ replaces the driver's program on the arm.
 |---|---|
 | `core.py` | Kinematics, clutch, and limits (no ROS) |
 | `teleop_node.py` | ROS 2 node: Quest input, safety checks, commands |
+| `gripper.py` | Drives the Robotiq 2F-85 directly through the URCap socket on the UR controller (no ROS) |
 | `quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
 | `quest_link.py` | Packet format and the sender allowlist |
 | `quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough) |
 | `check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
 | `record.sh` | Records a demonstration to a rosbag |
 | `fake_robot.py` | Driver stand-in for testing on an isolated ROS domain |
-| `test_core.py`, `test_quest_link.py` | Unit tests: `.venv/bin/python -m pytest -q` |
+| `test_core.py`, `test_quest_link.py`, `test_gripper.py` | Unit tests: `.venv/bin/python -m pytest -q` |
 
 ## Run
 
@@ -92,14 +93,17 @@ into (`tailscale ip -4` on that computer):
    ros2 service call /controller_manager/switch_controller controller_manager_msgs/srv/SwitchController \
      "{activate_controllers: [forward_position_controller], deactivate_controllers: [scaled_joint_trajectory_controller], strictness: 2, timeout: {sec: 2}}"
    ```
-3. **Go live.** The gripper position is the jaw gap in metres (2F-85: 0.085 open, 0 closed).
+3. **Go live.**
    ```bash
-   python3 teleop_node.py --live --robot-forward-yaw-deg 180 --tcp-z <m> \
-     --gripper-open 0.085 --gripper-closed 0
+   python3 teleop_node.py --live --robot-forward-yaw-deg 180
    ```
-   Pull the trigger (past halfway) to close the gripper, release it to open. `--gripper-effort` sets
-   the grip force in newtons (20 = the 2F-85's Low Force mode). The node sends nothing to the gripper
-   until the trigger is first pulled.
+   Pull the trigger (past halfway) to close the gripper, release it to open. The node drives the
+   gripper itself through the Robotiq URCap socket on the UR controller (`--gripper-ip`, port
+   63352, gripper `--gripper-sid 3`), not through any other ROS gripper server.
+   `--gripper-speed` and `--gripper-force` are the Robotiq registers (0-255) and both default to 0:
+   slowest, and Low Force mode with Secure Grip off. The node sends nothing to the gripper until
+   the trigger is first pulled, never activates it (activation moves the fingers: do it from the
+   pendant), and `--no-gripper` leaves it alone entirely.
 4. **Record** from a second shell: `./record.sh <task_name>`. Ctrl-C ends the demonstration.
 5. **Restore** the previous controller when finished, by reversing the switch in step 2.
 
