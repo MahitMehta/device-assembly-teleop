@@ -28,7 +28,9 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float64, Float64MultiArray, String
+from std_srvs.srv import Trigger
 from ur_dashboard_msgs.msg import RobotMode, SafetyMode
+from ur_msgs.srv import SetPayload
 
 from quest_teleop.utils.quest_link import DEFAULT_PORT, NO_JOG, UdpSource, quest_sample
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, jog_velocity
@@ -92,6 +94,7 @@ class TeleopNode(Node):
         self.speed_scaling = None
         self.force = None
         self.force_baseline = None
+        self.torque = None
         self.core = None
         self.fault = None
         self.joints_stale = False
@@ -153,7 +156,8 @@ class TeleopNode(Node):
     def _on_scaling(self, msg): self.speed_scaling = msg.data
 
     def _on_wrench(self, msg):
-        f = msg.wrench.force
+        f, t = msg.wrench.force, msg.wrench.torque
+        self.torque = np.array([t.x, t.y, t.z])
         self.force = np.array([f.x, f.y, f.z])
 
     def _gate(self, q_actual) -> str | None:
@@ -269,9 +273,12 @@ class TeleopNode(Node):
             f, w, z = self.jog_v
             out += f" jog: forward={f * 1000:+.1f}mm/s turn={np.degrees(w):+.1f}deg/s in/out={z * 1000:+.1f}mm/s"
         if self.force is not None:
-            out += f" force={np.linalg.norm(self.force):.0f}N"
+            out += f" force={np.linalg.norm(self.force):.1f}N"
             if self.force_baseline is not None:
-                out += f" change={np.linalg.norm(self.force - self.force_baseline):.0f}N"
+                out += f" change={np.linalg.norm(self.force - self.force_baseline):.1f}N"
+            out += " F=[{:+.1f} {:+.1f} {:+.1f}]N".format(*self.force)
+        if self.torque is not None:
+            out += " T=[{:+.2f} {:+.2f} {:+.2f}]Nm".format(*self.torque)
         if self.grip_closed is not None:
             out += f" gripper={'closed' if self.grip_closed else 'open'}"
         state = self.gripper.state if self.gripper is not None else None
@@ -345,9 +352,50 @@ def preflight(node: TeleopNode, timeout: float = 5.0) -> str | None:
     return None
 
 
+def set_payload(node: TeleopNode, mass: float, cog, timeout: float = 5.0) -> str | None:
+    """Tell the arm what hangs on its flange, so the F/T readings don't change as it tilts."""
+    pc = node.create_client(SetPayload, "/io_and_status_controller/set_payload")
+    if not pc.wait_for_service(timeout_sec=timeout):
+        return "set_payload service is not reachable"
+    req = SetPayload.Request()
+    req.mass = float(mass)
+    req.center_of_gravity.x, req.center_of_gravity.y, req.center_of_gravity.z = (float(v) for v in cog)
+    fut = pc.call_async(req)
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if not fut.done() or not fut.result().success:
+        return "setting the payload failed"
+    node.get_logger().info(f"Payload set: {mass:.3f} kg, centre of gravity {tuple(round(v, 4) for v in cog)} m from the flange")
+    return None
+
+
+def zero_ft(node: TeleopNode, timeout: float = 5.0) -> str | None:
+    """Zero the force/torque sensor, then report the readings. Returns an error string, or None.
+
+    Zeroing removes whatever the sensor reads now, including anything the gripper holds.
+    It does not replace a correct payload setting: with the gripper's weight missing from
+    the payload, tilting the gripper brings an offset back.
+    """
+    zc = node.create_client(Trigger, "/io_and_status_controller/zero_ftsensor")
+    if not zc.wait_for_service(timeout_sec=timeout):
+        return "zero_ftsensor service is not reachable"
+    fut = zc.call_async(Trigger.Request())
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if not fut.done() or not fut.result().success:
+        return f"zeroing the F/T sensor failed: {fut.result().message if fut.done() else 'timed out'}"
+    end = time.monotonic() + 0.5  # let fresh readings arrive
+    while time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.get_logger().info(f"F/T sensor zeroed.{node._readout()}")
+    return None
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--live", action="store_true", help="Actually command the arm and gripper")
+    p.add_argument("--no-ft-zero", action="store_true", help="Don't zero the force/torque sensor when going live")
+    # Robotiq's spec for the 2F-85 with its UR coupling: 925 g, centre of mass 58 mm out along the flange's z.
+    p.add_argument("--payload-mass", type=float, default=0.925, help="Payload set on the arm when going live (kg); 0 leaves it unchanged")
+    p.add_argument("--payload-cog", type=float, nargs=3, default=[0.0, 0.0, 0.058], metavar=("X", "Y", "Z"), help="Payload centre of gravity from the flange (m)")
     p.add_argument("--fake-source", action="store_true", help="Scripted motion instead of a Quest")
     p.add_argument("--fake-amplitude", type=float, default=0.03)
     p.add_argument("--fake-jog", action="store_true", help="Scripted source uses the stick and buttons instead of the grip")
@@ -370,7 +418,7 @@ def parse_args(argv=None):
     p.add_argument("--jog-yaw-speed", type=float, default=0.5, help="Stick turning speed at full deflection (rad/s)")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.01, help="Floor in the base frame (m), 1 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")
-    p.add_argument("--gripper-length", type=float, default=0.17, help="Flange to fingertips (m), for the floor check; a little over the 2F-85 with its coupling")
+    p.add_argument("--gripper-length", type=float, default=0.18, help="Flange to fingertips (m), for the floor check; Robotiq puts the 2F-85's pad centre at 174 mm with its coupling")
     p.add_argument("--gripper-ip", default="10.168.4.208", help="UR controller running the Robotiq URCap (socket port 63352)")
     p.add_argument("--gripper-sid", type=int, default=3, help="Gripper ID on the URCap socket ('GET SID' lists them)")
     p.add_argument("--gripper-speed", type=int, default=50, help="Robotiq speed register, 0 (slowest) to 255; does not change grip force")
@@ -393,7 +441,9 @@ def main(argv=None) -> int:
     node = TeleopNode(args, source)
     node.timer.cancel()
     if args.live:
-        error = preflight(node)
+        error = (preflight(node)
+                 or (None if args.payload_mass <= 0 else set_payload(node, args.payload_mass, args.payload_cog))
+                 or (None if args.no_ft_zero else zero_ft(node)))
         if error:
             node.get_logger().error(f"Refusing to go live: {error}")
             node.destroy_node()

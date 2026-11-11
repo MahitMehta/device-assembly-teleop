@@ -12,6 +12,8 @@ import numpy as np
 import rclpy
 from controller_manager_msgs.msg import ControllerState
 from controller_manager_msgs.srv import ListControllers
+from std_srvs.srv import Trigger
+from ur_msgs.srv import SetPayload
 from geometry_msgs.msg import WrenchStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -56,6 +58,8 @@ def list_cb(req, res):
 
 
 n.create_service(ListControllers, "/controller_manager/list_controllers", list_cb)
+n.create_service(SetPayload, "/io_and_status_controller/set_payload", lambda req, res: (setattr(res, "success", True), res)[1])
+n.create_service(Trigger, "/io_and_status_controller/zero_ftsensor", lambda req, res: (setattr(res, "success", True), res)[1])
 n.create_subscription(Float64MultiArray, "/forward_position_controller/commands", on_cmd, 1)
 n.create_subscription(String, "/teleop/status", lambda m: statuses.append(m.data), 10)
 n.create_subscription(Bool, "/teleop/engaged", lambda m: engaged.append(m.data), 10)

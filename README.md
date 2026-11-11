@@ -17,7 +17,7 @@ Python code runs as `python3 -m quest_teleop...` from this folder, with no build
 | `quest_teleop/tools/quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
 | `quest_teleop/tools/check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
 | `compose.yaml` | `coral` services: `driver` (our UR driver), `teleop`, `record`, `ros` |
-| `.example.env` | Settings for compose (IPs, ROS domain): copy to `.env` |
+| `.example.env` | Settings for compose (IPs, ROS domain, payload): copy to `.env` |
 | `Dockerfile` | The image those services run in: `ros:humble-ros-base` plus `ur_robot_driver`, Cyclone DDS and numpy. Built on first use; the code is mounted, so rebuild (`docker compose build`) only when dependencies change |
 | `scripts/record.sh` | Records a demonstration to a rosbag |
 | `scripts/ros.sh` | Container entrypoint: sources ROS 2, then runs the command |
@@ -68,7 +68,7 @@ Each command runs once in the foreground (Ctrl-C stops it); nothing starts or re
 
 ```bash
 git clone https://github.com/MahitMehta/device-assembly-teleop.git    # once
-cp .example.env .env    # once: IPs and ROS domain; edit SENDER_IP if the headset is on another computer
+cp .example.env .env    # once: IPs, ROS domain, payload; edit SENDER_IP if the headset is on another computer
 git pull                # after each push from the Mac
 ```
 
@@ -86,7 +86,10 @@ git pull                # after each push from the Mac
    ```
 3. **Before going live:** move the arm to a central pose away from wrist limits, set reduced speed
    limits on the pendant, have someone at the e-stop, and make sure the gripper is activated.
-   Zero the force sensor with nothing touching the gripper, so the force limits measure from 0:
+   Nothing should touch the gripper when the node starts: with `--live` it first sets the
+   payload (`PAYLOAD_*` in `.env`) and then zeroes the force/torque sensor, so the force limits
+   and the logged `F=`/`T=` readings measure from 0 (`--no-ft-zero` skips zeroing). To zero it
+   again by hand:
    ```bash
    docker compose run --rm ros ros2 service call /io_and_status_controller/zero_ftsensor std_srvs/srv/Trigger
    ```
@@ -131,7 +134,7 @@ The stick, A/B and tool-down turning follow the same holds and limits, and clear
 Joint states older than 50 ms, lost tracking, or 250 ms of network silence also hold position (without needing a grip release, and tool-down mode stays on), and silence keeps the gripper as it was. When tracking returns it re-engages from the current poses, so the
 arm does not jump. Motion is limited to a box of
 +/-40 cm around the startup pose (`--box-half-extent`), at 0.20 m/s and 1.0 rad/s by default (`--max-linear-speed`, `--max-angular-speed`). The box does not know
-about the table or the robot's own base. `--min-z` is a floor, 1 cm above the arm's base by default (`base` frame z = 0.01): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.17 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
+about the table or the robot's own base. `--min-z` is a floor, 1 cm above the arm's base by default (`base` frame z = 0.01): no part of the gripper (a box around it out to the fingertips, `--gripper-length` 0.18 m) and none of the elbow or wrist joints goes below it. The gripper slides along the floor; a step that would take the elbow or wrist below it is refused (`floor limit` in the log). Turning tool-down can lift the arm a little to keep the fingertips clear. These are software limits: they
 do not replace the pendant's safety limits or the e-stop. The log shows `workspace limit` or
 `joint limit` when one of these is stopping motion.
 

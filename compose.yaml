@@ -1,5 +1,5 @@
 # Run on coral from this folder, one command at a time, in the foreground (Ctrl-C stops it).
-# Settings (IPs, ROS domain) come from .env: cp .example.env .env
+# Settings (IPs, ROS domain, payload) come from .env: cp .example.env .env
 # Our own UR driver on our own ROS domain (67), independent of anything else on the arm.
 #   docker compose run --rm driver                  # UR driver, starts in forward_position_controller
 #   docker compose run --rm teleop                  # second shell: dry-run (sends nothing)
@@ -38,7 +38,9 @@ services:
   teleop:
     <<: *ros
     entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.teleop_node,
-                 --udp-bind, "${CORAL_IP:?}", --udp-from, "${SENDER_IP:?}"]
+                 --udp-bind, "${CORAL_IP:?}", --udp-from, "${SENDER_IP:?}",
+                 --payload-mass, "${PAYLOAD_MASS:?}",
+                 --payload-cog, "${PAYLOAD_COG_X:?}", "${PAYLOAD_COG_Y:?}", "${PAYLOAD_COG_Z:?}"]
     command: []
 
   record:
