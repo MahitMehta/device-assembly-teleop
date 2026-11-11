@@ -352,6 +352,12 @@ def preflight(node: TeleopNode, timeout: float = 5.0) -> str | None:
     return None
 
 
+def payload_inertia(mass: float) -> float:
+    """Moment of inertia (kg m^2) of a uniform 1 g/cm^3 sphere of this mass, about its centre."""
+    radius = (3 * mass / (4 * math.pi * 1000.0)) ** (1 / 3)
+    return 0.4 * mass * radius**2
+
+
 def set_payload(node: TeleopNode, mass: float, cog, timeout: float = 5.0) -> str | None:
     """Tell the arm what hangs on its flange, so the F/T readings don't change as it tilts."""
     pc = node.create_client(SetPayload, "/io_and_status_controller/set_payload")
@@ -360,6 +366,10 @@ def set_payload(node: TeleopNode, mass: float, cog, timeout: float = 5.0) -> str
     req = SetPayload.Request()
     req.mass = float(mass)
     req.center_of_gravity.x, req.center_of_gravity.y, req.center_of_gravity.z = (float(v) for v in cog)
+    # The driver sends set_target_payload, and an all-zero inertia stops the arm's program.
+    # Use what the arm assumes when none is given: a uniform 1 g/cm^3 sphere of this mass.
+    i = payload_inertia(mass)
+    req.ixx = req.iyy = req.izz = i
     fut = pc.call_async(req)
     rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
     if not fut.done() or not fut.result().success:
