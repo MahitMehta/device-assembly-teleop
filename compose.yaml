@@ -7,6 +7,7 @@
 #   docker compose run --rm record <task_name>      # third shell, while live
 #   docker compose run --rm camera                  # on the camera laptop, not coral
 #   docker compose run --rm ros <any command>       # e.g. ros2 topic list
+#   docker compose run --rm rviz                    # on a machine with a display (xhost +local:root first)
 # Nothing starts by itself and nothing restarts: every service is behind the `manual`
 # profile, so a bare `docker compose up` does nothing.
 
@@ -19,7 +20,7 @@ x-ros: &ros
   volumes:
     - .:/teleop
     - /data:/data
-  environment:
+  environment: &ros-env
     ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:?set in .env (cp .example.env .env)}
     RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
     # Keep DDS on the robot network (coral and the camera laptop), not Tailscale, Docker or Wi-Fi.
@@ -55,7 +56,24 @@ services:
     volumes:
       - .:/teleop
       - /dev:/dev
+    environment:
+      <<: *ros-env
+      CAMERA_SERIAL: ${CAMERA_SERIAL:-}   # .env: which RealSense is the wrist camera
     entrypoint: [scripts/ros.sh, scripts/camera.sh]
+
+  rviz:
+    # Arm model, TF (with the wrist camera calibration) and the wrist image. Run it on the camera
+    # laptop so raw images stay on that machine. The host must allow the container on its
+    # display first: xhost +local:root
+    <<: *ros
+    volumes:
+      - .:/teleop
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      <<: *ros-env
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+    entrypoint: [scripts/ros.sh, rviz2, -d, config/teleop.rviz]
 
   record:
     <<: *ros

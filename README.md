@@ -17,7 +17,8 @@ Python code runs as `python3 -m quest_teleop...` from this folder, with no build
 | `quest_teleop/tools/quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
 | `quest_teleop/tools/check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
 | `quest_teleop/tools/calibrate_wrist_camera.py` | Hand-eye calibration of the wrist camera; writes `config/wrist_camera_tf` |
-| `compose.yaml` | `coral` services: `driver` (our UR driver), `teleop`, `record`, `ros`; and `camera` for the laptop the wrist camera is plugged into |
+| `compose.yaml` | `coral` services: `driver` (our UR driver), `teleop`, `record`, `ros`; `camera` for the laptop the wrist camera is plugged into; `rviz` for any machine with a display |
+| `config/teleop.rviz` | RViz layout for the `rviz` service: arm model, TF frames, wrist image |
 | `scripts/camera.sh` | `camera` service: RealSense node plus the calibrated `tool0` -> `camera_link` transform |
 | `.example.env` | Settings for compose (IPs, ROS domain, payload): copy to `.env` |
 | `Dockerfile` | The image those services run in: `ros:humble-ros-base` plus `ur_robot_driver`, Cyclone DDS and numpy. Built on first use; the code is mounted, so rebuild (`docker compose --profile manual build`) only when dependencies change |
@@ -131,13 +132,15 @@ to the colour image as lossless PNG (`/compressedDepth`, 16-bit millimetres), ea
 from `coral`.
 
 On the laptop, once: clone this repo, `cp .example.env .env`, and set `DDS_IP` to the laptop's
-`10.168.4.x` address (`ip -br addr`). `DDS_IP` keeps ROS traffic on the robot network; on `coral`
+`10.168.4.x` address (`ip -br addr`). If more than one RealSense is plugged in, set `CAMERA_SERIAL`
+to the wrist camera's serial number, or the node opens whichever it finds first. To list them:
+`docker compose run --rm --entrypoint scripts/ros.sh camera rs-enumerate-devices -s` (the
+`camera` service's startup log also prints each serial and model). `DDS_IP` keeps ROS traffic on the robot network; on `coral`
 it is `10.168.4.33`. Check that `timedatectl` says the clock is synchronized: images are stamped
 with the laptop's clock, joint states with `coral`'s. Then:
 
 ```bash
 docker compose run --rm camera                   # 640x480 colour and aligned depth at 30 Hz
-docker compose run --rm camera serial_no:=_<serial>  # if another RealSense is also plugged in
 ```
 
 Extra arguments go to `rs_launch.py`. From `coral`, both of these should show about 30 Hz:
@@ -155,6 +158,18 @@ for 16 MB, and use it once allowed), then restart the services:
 ```bash
 echo 'net.core.rmem_max = 16777216' | sudo tee /etc/sysctl.d/60-ros2-dds.conf && sudo sysctl --system
 ```
+
+**RViz** shows the arm, the TF frames (including `tool0` -> `camera_link` once calibrated) and the
+wrist image. Run it on the laptop, so the raw images it views stay on that machine. Allow the
+container on the display first (once per login):
+
+```bash
+xhost +local:root
+docker compose run --rm rviz
+```
+
+The point cloud display is off by default; to use it, start `camera` with `pointcloud.enable:=true`
+and tick it in the Displays panel. Changes you save go to `config/teleop.rviz`.
 
 **Calibration** (once, and again whenever the camera mount moves) finds `tool0` -> `camera_link`.
 It uses the lab's ArUco grid board (3x4 markers, DICT_5X5_50, 57.5 mm squares, as in Albus's

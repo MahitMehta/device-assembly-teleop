@@ -1,0 +1,89 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Reference Frame: <Fixed Frame>
+      Cell Size: 0.1
+      Plane Cell Count: 20
+    - Class: rviz_default_plugins/RobotModel
+      Enabled: true
+      Name: RobotModel
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Visual Enabled: true
+      Collision Enabled: false
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Marker Scale: 0.3
+      Show Arrows: false
+      Show Axes: true
+      Show Names: true
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: true
+        tool0:
+          Value: true
+        camera_link:
+          Value: true
+        camera_color_optical_frame:
+          Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Wrist colour
+      Topic:
+        Value: /camera/camera/color/image_raw
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/PointCloud2
+      # Needs the camera started with pointcloud.enable:=true
+      Enabled: false
+      Name: Wrist point cloud
+      Topic:
+        Value: /camera/camera/depth/color/points
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+      Color Transformer: RGB8
+      Style: Points
+      Size (Pixels): 2
+  Enabled: true
+  Global Options:
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 2.0
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.3
+      Pitch: 0.5
+      Yaw: 0.8
+      Target Frame: <Fixed Frame>
+    Saved: ~
+Window Geometry:
+  Width: 1400
+  Height: 900

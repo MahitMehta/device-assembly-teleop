@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-realsense2-camera \
         ros-humble-image-transport-plugins \
         python3-opencv \
+        ros-humble-rviz2 \
     && rm -rf /var/lib/apt/lists/*
 
 # The driver's arm-side script calls set_target_payload with a transition_time on PolyScope
