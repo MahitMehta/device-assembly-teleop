@@ -16,9 +16,11 @@ Python code runs as `python3 -m quest_teleop...` from this folder, with no build
 | `quest_teleop/utils/quest_link.py` | Packet format and the sender allowlist |
 | `quest_teleop/tools/quest_sender.py` | Runs on the Mac: sends Quest poses to `coral` over Tailscale |
 | `quest_teleop/tools/check_quest.py` | Reads the USB-connected Quest for 15 s and prints a summary; sends nothing |
-| `compose.yaml` | `coral` services: `driver` (our UR driver), `teleop`, `record`, `ros` |
+| `quest_teleop/tools/calibrate_wrist_camera.py` | Hand-eye calibration of the wrist camera; writes `config/wrist_camera_tf` |
+| `compose.yaml` | `coral` services: `driver` (our UR driver), `teleop`, `record`, `ros`; and `camera` for the laptop the wrist camera is plugged into |
+| `scripts/camera.sh` | `camera` service: RealSense node plus the calibrated `tool0` -> `camera_link` transform |
 | `.example.env` | Settings for compose (IPs, ROS domain, payload): copy to `.env` |
-| `Dockerfile` | The image those services run in: `ros:humble-ros-base` plus `ur_robot_driver`, Cyclone DDS and numpy. Built on first use; the code is mounted, so rebuild (`docker compose build`) only when dependencies change |
+| `Dockerfile` | The image those services run in: `ros:humble-ros-base` plus `ur_robot_driver`, Cyclone DDS and numpy. Built on first use; the code is mounted, so rebuild (`docker compose --profile manual build`) only when dependencies change |
 | `scripts/record.sh` | Records a demonstration to a rosbag |
 | `scripts/ros.sh` | Container entrypoint: sources ROS 2, then runs the command |
 | `headset/quest_app.patch` | Our changes to the `oculus_reader` headset app (headset pose, passthrough, stick click, highest display refresh rate) |
@@ -104,8 +106,8 @@ git pull                # after each push from the Mac
    node sends nothing to the gripper until the trigger is first pulled, never activates it
    (activation moves the fingers: do it from the pendant), and `--no-gripper` leaves it alone.
 5. **Record** from a third shell: `docker compose run --rm record <task_name>`. Ctrl-C ends the
-   demonstration. Only topics on our domain are recorded: a camera has to publish on domain 67
-   to be included.
+   demonstration. Only topics on our domain are recorded, so start the wrist camera first
+   (below).
 6. **When finished**, Ctrl-C the teleop node and then the driver, so the arm is free for others.
 
 For anything else, `docker compose run --rm ros <command>` runs it with ROS sourced, e.g.
@@ -118,6 +120,57 @@ containers), e.g. the teleop node or the driver:
 docker logs -f $(docker ps -q --filter name=teleop-run)
 docker logs -f $(docker ps -q --filter name=driver-run)
 ```
+
+## Wrist camera
+
+The D435 on the wrist plugs into the lab laptop (wired into the robot network, `10.168.4.x`), not
+`coral`. The laptop runs the `camera` service from this same folder on domain 67, and `coral`'s
+`record` picks the images up over the network: colour as JPEG (`/compressed`) and depth aligned
+to the colour image as lossless PNG (`/compressedDepth`, 16-bit millimetres), each with its
+`camera_info`. Only these compressed topics should cross the network: don't view the raw images
+from `coral`.
+
+On the laptop, once: clone this repo, `cp .example.env .env`, and set `DDS_IP` to the laptop's
+`10.168.4.x` address (`ip -br addr`). `DDS_IP` keeps ROS traffic on the robot network; on `coral`
+it is `10.168.4.33`. Check that `timedatectl` says the clock is synchronized: images are stamped
+with the laptop's clock, joint states with `coral`'s. Then:
+
+```bash
+docker compose run --rm camera                   # 640x480 colour and aligned depth at 30 Hz
+docker compose run --rm camera serial_no:=_<serial>  # if another RealSense is also plugged in
+```
+
+Extra arguments go to `rs_launch.py`. From `coral`, both of these should show about 30 Hz:
+
+```bash
+docker compose run --rm ros ros2 topic hz /camera/camera/color/image_raw/compressed
+docker compose run --rm ros ros2 topic hz /camera/camera/aligned_depth_to_color/image_raw/compressedDepth
+```
+
+A depth frame is a few hundred KB, larger than `coral`'s default UDP receive buffer (212 KB).
+If depth comes in slow or uneven while colour is fine, `nstat -az UdpRcvbufErrors` on `coral`
+will be climbing: someone with sudo has to raise the limit once (our DDS settings already ask
+for 16 MB, and use it once allowed), then restart the services:
+
+```bash
+echo 'net.core.rmem_max = 16777216' | sudo tee /etc/sysctl.d/60-ros2-dds.conf && sudo sysctl --system
+```
+
+**Calibration** (once, and again whenever the camera mount moves) finds `tool0` -> `camera_link`.
+It uses the lab's ArUco grid board (3x4 markers, DICT_5X5_50, 57.5 mm squares, as in Albus's
+ROS2-essentials). Fix the board flat to the table. With the driver and the camera running, on
+the laptop (so the result lands where `camera` reads it):
+
+```bash
+docker compose run --rm ros python3 -m quest_teleop.tools.calibrate_wrist_camera
+```
+
+Take 15-20 samples (Enter), with the whole board in view and the arm still for each, rotating the
+wrist as much as you can about different axes between them. Then `s` + Enter solves and writes
+`config/wrist_camera_tf`. Check the printed distance from the flange against the mount, and that
+the board's position spread is a few mm. Restart `camera`, which then publishes the transform to
+`/tf_static`, so it is in every recording. Keep the file in git (copy it to the Mac and commit it if
+the laptop can't push), so each recording's calibration can be traced.
 
 ## Safety behaviour
 

@@ -10,6 +10,8 @@ exec ros2 bag record -o "$out" \
   /force_torque_sensor_broadcaster/wrench \
   /camera/camera/color/image_raw/compressed \
   /camera/camera/color/camera_info \
+  /camera/camera/aligned_depth_to_color/image_raw/compressedDepth \
+  /camera/camera/aligned_depth_to_color/camera_info \
   /forward_position_controller/commands \
   /teleop/target_pose \
   /teleop/engaged \

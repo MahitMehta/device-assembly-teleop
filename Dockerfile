@@ -6,6 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-ur-robot-driver \
         ros-humble-rmw-cyclonedds-cpp \
         python3-numpy \
+        ros-humble-realsense2-camera \
+        ros-humble-image-transport-plugins \
+        python3-opencv \
     && rm -rf /var/lib/apt/lists/*
 
 # The driver's arm-side script calls set_target_payload with a transition_time on PolyScope

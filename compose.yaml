@@ -5,13 +5,14 @@
 #   docker compose run --rm teleop                  # second shell: dry-run (sends nothing)
 #   docker compose run --rm teleop --live           # extra args go to teleop_node
 #   docker compose run --rm record <task_name>      # third shell, while live
+#   docker compose run --rm camera                  # on the camera laptop, not coral
 #   docker compose run --rm ros <any command>       # e.g. ros2 topic list
 # Nothing starts by itself and nothing restarts: every service is behind the `manual`
 # profile, so a bare `docker compose up` does nothing.
 
 x-ros: &ros
   image: quest-teleop:humble
-  build: .                         # Dockerfile; built on first use (`docker compose build` to rebuild)
+  build: .                         # Dockerfile; built on first use (`docker compose --profile manual build` to rebuild)
   network_mode: host
   init: true                       # pass Ctrl-C through
   working_dir: /teleop
@@ -21,6 +22,10 @@ x-ros: &ros
   environment:
     ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:?set in .env (cp .example.env .env)}
     RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+    # Keep DDS on the robot network (coral and the camera laptop), not Tailscale, Docker or Wi-Fi.
+    # Ask for socket buffers big enough for whole depth frames; the kernel grants at most
+    # net.core.rmem_max (README, Wrist camera), and asking for more than that is harmless.
+    CYCLONEDDS_URI: <CycloneDDS><Domain><General><Interfaces><NetworkInterface address="${DDS_IP:?set in .env}"/></Interfaces></General><Internal><SocketReceiveBufferSize min="default" max="16MB"/></Internal></Domain></CycloneDDS>
     PYTHONDONTWRITEBYTECODE: "1"   # no root-owned __pycache__ in the checkout
   profiles: [manual]
 
@@ -42,6 +47,15 @@ services:
                  --payload-mass, "${PAYLOAD_MASS:?}",
                  --payload-cog, "${PAYLOAD_COG_X:?}", "${PAYLOAD_COG_Y:?}", "${PAYLOAD_COG_Z:?}"]
     command: []
+
+  camera:
+    # On the lab laptop the wrist D435 is plugged into, not on coral.
+    <<: *ros
+    privileged: true               # USB access to the RealSense
+    volumes:
+      - .:/teleop
+      - /dev:/dev
+    entrypoint: [scripts/ros.sh, scripts/camera.sh]
 
   record:
     <<: *ros
