@@ -86,21 +86,22 @@ def test_old_app_without_head_pose_fails_clearly():
 
 def test_jog_is_delivered_and_silence_stops_it():
     s = source()
-    assert s.accept(pack(1, np.eye(4), np.eye(4), False, 0.0, (0.5, -1.0, 1.0)), MAC, now=0.0)
-    assert np.allclose(s.read(now=0.1)[4], (0.5, -1.0, 1.0))
+    assert s.accept(pack(1, np.eye(4), np.eye(4), False, 0.0, (0.5, -1.0, 1.0, -0.25)), MAC, now=0.0)
+    assert np.allclose(s.read(now=0.1)[4], (0.5, -1.0, 1.0, -0.25))
     assert s.read(now=1.0)[4] == NO_JOG
 
 
 def test_rejects_bad_jog():
     s = source()
-    for jog in ((float("nan"), 0.0, 0.0), (0.0, 5.0, 0.0)):
+    for jog in ((float("nan"), 0.0, 0.0, 0.0), (0.0, 5.0, 0.0, 0.0), (0.0, 0.0, 0.0, 5.0)):
         assert not s.accept(pack(1, np.eye(4), np.eye(4), False, 0.0, jog), MAC, now=0.0)
 
 
 def test_quest_sample_reads_stick_and_buttons():
     t = {"r": np.eye(4), "h": np.eye(4)}
-    assert quest_sample(t, {"rightJS": (0.25, -0.5), "A": True})[4] == (0.25, -0.5, 1.0)
-    assert quest_sample(t, {"B": True})[4] == (0.0, 0.0, -1.0)
+    assert quest_sample(t, {"rightJS": (0.25, -0.5), "A": True})[4] == (0.25, -0.5, 1.0, 0.0)
+    assert quest_sample(t, {"leftJS": (-0.75, 0.3)})[4] == (0.0, 0.0, 0.0, -0.75)
+    assert quest_sample(t, {"B": True})[4] == (0.0, 0.0, -1.0, 0.0)
     assert quest_sample(t, {})[4] == NO_JOG
 
 

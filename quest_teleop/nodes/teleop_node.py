@@ -5,8 +5,9 @@ Dry-run is the default: it computes motion but sends nothing to the arm or gripp
 This node never switches controllers. Activate forward_position_controller yourself.
 
 Controls (right controller): hold grip = move, trigger = gripper,
-and with the grip released: stick up/down = forward/back along the way the gripper faces, stick left/right = turn it about
-vertical, A/B = fine in/out along the tool's z axis.
+and with the grip released: stick up/down = forward/back along the way the gripper faces, stick left/right = level
+along the tool's x axis, A/B = fine in/out along the tool's z axis. Left controller: stick left/right = turn the
+gripper about vertical (right = clockwise from above).
 Click the stick to toggle tool-down mode: the gripper turns to point straight down and stays
 that way; twisting your hand still turns it about vertical. Any hold turns the mode off.
 """
@@ -78,7 +79,7 @@ class FakeSource:
         if self._jog:
             # Grip released throughout: stick, then a neutral gap, then the in/out button.
             phase = t % 8.0
-            jog = (1.0, 0.0, 0.0) if phase < 3.0 else (0.0, 0.0, 1.0) if 4.0 < phase < 6.0 else NO_JOG
+            jog = (1.0, 0.0, 0.0, 0.0) if phase < 3.0 else (0.0, 0.0, 1.0, 0.0) if 4.0 < phase < 6.0 else NO_JOG
             return pose, False, 0.0, np.eye(4), jog, False
         return pose, 1.0 < t % 8.0 < 6.0, 0.5 + 0.5 * math.sin(t), np.eye(4), NO_JOG, False
 
@@ -197,7 +198,7 @@ class TeleopNode(Node):
             self.get_logger().info("Tool-down mode ON: turning the gripper to point down" if toggled else "Tool-down mode OFF")
 
         # The stick works only with the grip released and a live, tracked controller.
-        jog_v = jog_velocity(jog, self.args.jog_speed, self.args.jog_yaw_speed) if pose is not None and not clutch else np.zeros(3)
+        jog_v = jog_velocity(jog, self.args.jog_speed, self.args.jog_yaw_speed) if pose is not None and not clutch else np.zeros(4)
         jogging = bool(np.any(jog_v))
         self.jog_v = jog_v if jogging else None
 
@@ -270,8 +271,9 @@ class TeleopNode(Node):
         """Force and gripper values for the log, to compare against the limits."""
         out = " tool-down" if self.core is not None and self.core.tool_down else ""
         if self.jog_v is not None:
-            f, w, z = self.jog_v
-            out += f" jog: forward={f * 1000:+.1f}mm/s turn={np.degrees(w):+.1f}deg/s in/out={z * 1000:+.1f}mm/s"
+            f, w, z, x = self.jog_v
+            out += (f" jog: forward={f * 1000:+.1f}mm/s sideways={x * 1000:+.1f}mm/s turn={np.degrees(w):+.1f}deg/s"
+                    f" in/out={z * 1000:+.1f}mm/s")
         if self.force is not None:
             out += f" force={np.linalg.norm(self.force):.1f}N"
             if self.force_baseline is not None:
@@ -424,8 +426,8 @@ def parse_args(argv=None):
     p.add_argument("--max-force-delta", type=float, default=30.0, help="N above the value at clutch engage")
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N, measured; the reading at rest varies with pose, so compare with the log")
     p.add_argument("--tool-down", action="store_true", help="Start in tool-down mode (stick click toggles it)")
-    p.add_argument("--jog-speed", type=float, default=0.01, help="Stick forward/back speed at full deflection (m/s); A/B run at half of this")
-    p.add_argument("--jog-yaw-speed", type=float, default=0.5, help="Stick turning speed at full deflection (rad/s)")
+    p.add_argument("--jog-speed", type=float, default=0.01, help="Right stick speed at full deflection, forward/back and sideways (m/s); A/B run at half of this")
+    p.add_argument("--jog-yaw-speed", type=float, default=0.5, help="Left stick turning speed at full deflection (rad/s)")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.01, help="Floor in the base frame (m), 1 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")
     p.add_argument("--gripper-length", type=float, default=0.18, help="Flange to fingertips (m), for the floor check; Robotiq puts the 2F-85's pad centre at 174 mm with its coupling")

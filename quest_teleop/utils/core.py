@@ -110,27 +110,31 @@ def operator_to_base(head: np.ndarray, robot_forward_yaw: float) -> np.ndarray:
 
 
 def jog_velocity(jog, speed: float, yaw_speed: float, deadband: float = 0.15) -> np.ndarray:
-    """Turn (stick x, stick y, in/out) into (forward m/s, yaw rad/s, in/out m/s).
+    """Turn (right stick x, right stick y, in/out, left stick x) into
+    (forward m/s, yaw rad/s, in/out m/s, sideways m/s).
 
-    Stick up/down drives forward/back along the way the gripper faces; stick right turns it
-    clockwise seen from above. The dead zone is per axis so a nudge does one thing only, and
-    the squared stick response gives fine control near the centre. In/out comes from
-    buttons, so it has one speed: half of full stick.
+    Right stick up/down drives forward/back along the way the gripper faces, and right stick
+    left/right drives it level along its x axis. Left stick right turns it clockwise seen from
+    above. The dead zone is per axis so a nudge does one thing only, and the squared stick
+    response gives fine control near the centre. In/out comes from buttons, so it has one
+    speed: half of full stick.
     """
     def stick(v: float) -> float:
         size = (min(abs(v), 1.0) - deadband) / (1.0 - deadband)
         return float(np.sign(v)) * size ** 2 if size > 0 else 0.0
 
-    x, y, z = jog
-    return np.array([speed * stick(y), -yaw_speed * stick(x), 0.5 * speed * float(np.clip(z, -1.0, 1.0))])
+    x, y, z, turn = jog
+    return np.array([speed * stick(y), -yaw_speed * stick(turn), 0.5 * speed * float(np.clip(z, -1.0, 1.0)),
+                     speed * stick(x)])
 
 
-def heading(R: np.ndarray) -> np.ndarray | None:
-    """The way the gripper faces, flat on the table: tool +y with its vertical part removed.
+def heading(R: np.ndarray, axis: int = 1) -> np.ndarray | None:
+    """The way the gripper faces, flat on the table: tool +y with its vertical part removed
+    (axis=0: tool +x, the sideways direction, likewise).
 
-    None when tool +y is nearly vertical, so the heading is not defined.
+    None when that axis is nearly vertical, so the direction is not defined.
     """
-    flat = np.array([R[0, 1], R[1, 1], 0.0])
+    flat = np.array([R[0, axis], R[1, axis], 0.0])
     n = np.linalg.norm(flat)
     return flat / n if n > 0.2 else None
 
@@ -302,24 +306,29 @@ class TeleopCore:
         return self.q_cmd
 
     def jog(self, command: np.ndarray, dt: float) -> np.ndarray:
-        """Fine motion from jog_velocity's (forward, yaw rate, in/out).
+        """Fine motion from jog_velocity's (forward, yaw rate, in/out, sideways).
 
-        Forward runs level along the gripper's heading, yaw turns it about vertical through
-        the TCP, and in/out runs along the tool's z axis. Same limits as hand motion.
+        Forward runs level along the gripper's heading, sideways level along its x axis, yaw
+        turns it about vertical through the TCP, and in/out runs along the tool's z axis.
+        Same limits as hand motion.
         """
         self.engaged = False
         self.latched_glitch = False
         self._aligning = False
         self._last_ctrl = None
         self.status = "jogging"
-        forward, yaw_rate, inout = (float(v) for v in command)
+        forward, yaw_rate, inout, sideways = (float(v) for v in command)
         out = self.target.copy()
         R = out[:3, :3]
-        ahead = heading(R)
+        ahead, side = heading(R), heading(R, axis=0)
         if ahead is None and forward:
             forward = 0.0
             self.status = "no heading: gripper facing up or down along tool y"
-        velocity = (forward * ahead if forward else np.zeros(3)) + inout * R[:, 2]
+        if side is None and sideways:
+            sideways = 0.0
+            self.status = "no sideways direction: tool x points up or down"
+        velocity = ((forward * ahead if forward else np.zeros(3)) + (sideways * side if sideways else np.zeros(3))
+                    + inout * R[:, 2])
         n = np.linalg.norm(velocity)
         if n > self.lim.max_linear_speed:
             velocity = velocity * self.lim.max_linear_speed / n

@@ -144,7 +144,7 @@ def test_jog_forward_follows_the_gripper_heading_and_stays_level():
     for q in (HOME, turned):
         c = TeleopCore(q)
         start = fk(c.q_cmd)
-        _jog_for(c, np.array([0.01, 0.0, 0.0]))
+        _jog_for(c, np.array([0.01, 0.0, 0.0, 0.0]))
         end = fk(c.q_cmd)
         d = end[:3, 3] - start[:3, 3]
         assert np.allclose(d, 0.02 * _flat(start[:3, 1]), atol=5e-4)  # level, along the heading
@@ -156,7 +156,7 @@ def test_jog_forward_direction_turns_with_the_gripper():
     for q in (HOME, HOME + np.array([0.0, 0.0, 0.0, 0.0, 0.0, np.pi / 2])):
         c = TeleopCore(q)
         start = fk(c.q_cmd)[:3, 3]
-        _jog_for(c, np.array([0.01, 0.0, 0.0]))
+        _jog_for(c, np.array([0.01, 0.0, 0.0, 0.0]))
         moves.append(fk(c.q_cmd)[:3, 3] - start)
     assert np.linalg.norm(moves[0]) > 0.015 and np.linalg.norm(moves[1]) > 0.015
     assert abs(_flat(moves[0]) @ _flat(moves[1])) < 0.1
@@ -167,7 +167,7 @@ def test_jog_turn_is_about_vertical_in_place():
     c.set_tool_down(True)
     run(c, [pose()] * int(6 / DT), clutch=False)  # point down first
     start = fk(c.q_cmd)
-    _jog_for(c, np.array([0.0, -0.2, 0.0]), seconds=1.0)  # stick right: clockwise from above
+    _jog_for(c, np.array([0.0, -0.2, 0.0, 0.0]), seconds=1.0)  # left stick right: clockwise from above
     end = fk(c.q_cmd)
     turn = rotvec_from_matrix(end[:3, :3] @ start[:3, :3].T)
     assert np.allclose(turn, [0.0, 0.0, -0.2], atol=5e-3)
@@ -177,56 +177,75 @@ def test_jog_turn_is_about_vertical_in_place():
     assert np.allclose(_flat(end[:3, 1]), matrix_from_rotvec(np.array([0, 0, -0.2])) @ _flat(start[:3, 1]), atol=5e-3)
 
 
+def test_jog_sideways_runs_level_along_tool_x_without_turning():
+    c = TeleopCore(HOME)
+    c.set_tool_down(True)
+    run(c, [pose()] * int(6 / DT), clutch=False)  # point down first, so tool x is level
+    start = fk(c.q_cmd)
+    _jog_for(c, np.array([0.0, 0.0, 0.0, 0.01]))
+    end = fk(c.q_cmd)
+    assert np.allclose(end[:3, 3] - start[:3, 3], 0.02 * _flat(start[:3, 0]), atol=5e-4)
+    assert np.allclose(end[:3, :3], start[:3, :3], atol=1e-3)
+
+
+def test_jog_sideways_without_a_level_tool_x_does_not_drive():
+    c = TeleopCore(HOME)
+    c.target[:3, :3] = matrix_from_rotvec(np.array([0.0, np.pi / 2, 0.0]))  # tool x straight down
+    c.jog(np.array([0.0, 0.0, 0.0, 0.01]), DT)
+    assert "no sideways" in c.status
+
+
 def test_jog_inout_runs_along_the_tool_z_axis():
     c = TeleopCore(HOME)
     start = fk(c.q_cmd)
-    _jog_for(c, np.array([0.0, 0.0, 0.005]))
+    _jog_for(c, np.array([0.0, 0.0, 0.005, 0.0]))
     d = fk(c.q_cmd)[:3, 3] - start[:3, 3]
     assert np.allclose(d, 0.01 * start[:3, 2], atol=5e-4)
 
 
 def test_jog_velocity_shape():
-    assert np.array_equal(jog_velocity((0.1, -0.14, 0.0), 0.01, 0.3), np.zeros(3))
+    assert np.array_equal(jog_velocity((0.1, -0.14, 0.0, 0.12), 0.01, 0.3), np.zeros(4))
     # Stick up = forward, stick right = clockwise (negative yaw), A = in at half speed.
-    assert np.allclose(jog_velocity((0.0, 1.0, 0.0), 0.01, 0.3), [0.01, 0.0, 0.0])
-    assert np.allclose(jog_velocity((1.0, 0.0, 0.0), 0.01, 0.3), [0.0, -0.3, 0.0])
-    assert np.allclose(jog_velocity((0.0, 0.0, -1.0), 0.01, 0.3), [0.0, 0.0, -0.005])
+    assert np.allclose(jog_velocity((0.0, 1.0, 0.0, 0.0), 0.01, 0.3), [0.01, 0.0, 0.0, 0.0])
+    assert np.allclose(jog_velocity((1.0, 0.0, 0.0, 0.0), 0.01, 0.3), [0.0, 0.0, 0.0, 0.01])  # right stick right: sideways
+    assert np.allclose(jog_velocity((0.0, 0.0, 0.0, 1.0), 0.01, 0.3), [0.0, -0.3, 0.0, 0.0])  # left stick right: clockwise
+    assert np.allclose(jog_velocity((0.0, 0.0, -1.0, 0.0), 0.01, 0.3), [0.0, 0.0, -0.005, 0.0])
     # Half stick is well under half speed, for fine control.
-    assert 0 < jog_velocity((0.0, 0.5, 0.0), 0.01, 0.3)[0] < 0.002
+    assert 0 < jog_velocity((0.0, 0.5, 0.0, 0.0), 0.01, 0.3)[0] < 0.002
 
 
 def test_jog_without_a_heading_does_not_drive():
     c = TeleopCore(HOME)
     c.target[:3, :3] = matrix_from_rotvec(np.array([np.pi / 2, 0.0, 0.0]))  # tool +y straight up
-    c.jog(np.array([0.01, 0.0, 0.0]), DT)
+    c.jog(np.array([0.01, 0.0, 0.0, 0.0]), DT)
     assert "no heading" in c.status
 
 
 def test_jog_respects_speed_box_and_floor():
     c = TeleopCore(HOME, limits=Limits(max_linear_speed=0.02))
     start = fk(c.q_cmd)[:3, 3].copy()
-    c.jog(np.array([1.0, 0.0, 0.0]), DT)
+    c.jog(np.array([1.0, 0.0, 0.0, 0.0]), DT)
     assert np.linalg.norm(c.target[:3, 3] - start) <= 0.02 * DT + 1e-9
     c = TeleopCore(HOME, limits=Limits(max_angular_speed=0.1))
     R0 = c.target[:3, :3].copy()
-    c.jog(np.array([0.0, 5.0, 0.0]), DT)
+    c.jog(np.array([0.0, 5.0, 0.0, 0.0]), DT)
     assert np.linalg.norm(rotvec_from_matrix(c.target[:3, :3] @ R0.T)) <= 0.1 * DT + 1e-9
 
     c = TeleopCore(HOME, limits=Limits(box_half_extent=0.01))
     center = c.box_center.copy()
-    _jog_for(c, np.array([0.02, 0.0, 0.02]))
+    _jog_for(c, np.array([0.02, 0.0, 0.02, 0.0]))
     assert c.status == "workspace limit" and np.max(np.abs(fk(c.q_cmd)[:3, 3] - center)) < 0.0105
 
     start_z = fk(HOME)[2, 3]
     c = TeleopCore(HOME, limits=Limits(min_z=start_z - 0.005, max_linear_speed=0.02))
     R = fk(HOME)[:3, :3]
-    _jog_for(c, np.array([0.0, 0.0, -0.02 * np.sign(R[2, 2])]))  # in/out pointed downward
+    _jog_for(c, np.array([0.0, 0.0, -0.02 * np.sign(R[2, 2]), 0.0]))  # in/out pointed downward
     assert fk(c.q_cmd)[2, 3] > start_z - 0.0055
 
 
 def test_jog_stops_with_the_stick_and_grip_does_not_jump_after():
     c = TeleopCore(HOME, Mapping(position_scale=1.0))
-    _jog_for(c, np.array([0.01, 0.0, 0.0]), 1.0)
+    _jog_for(c, np.array([0.01, 0.0, 0.0, 0.0]), 1.0)
     held = c.q_cmd.copy()
     for _ in range(50):
         c.update(pose(0, 0, 0), False, DT)
@@ -437,7 +456,7 @@ def test_tool_down_turns_at_the_angular_limit():
 def test_jog_aligns_to_tool_down():
     c = TeleopCore(LIVE_Q)
     c.set_tool_down(True)
-    _jog_for(c, np.array([0.0, 0.0, 0.001]), seconds=6.0)
+    _jog_for(c, np.array([0.0, 0.0, 0.001, 0.0]), seconds=6.0)
     assert _tool_z(c) @ DOWN > 0.9999
 
 
@@ -489,7 +508,7 @@ def test_jog_down_stops_at_the_floor_with_the_gripper():
     run(c, [pose()] * int(6 / DT), clutch=False)
     floor = _lowest_gripper_point(c) - 0.01
     c = TeleopCore(c.q_cmd, limits=Limits(min_z=floor, gripper_length=0.17))
-    _jog_for(c, np.array([0.0, 0.0, 0.02]), seconds=3.0)  # A: along tool z, straight down
+    _jog_for(c, np.array([0.0, 0.0, 0.02, 0.0]), seconds=3.0)  # A: along tool z, straight down
     assert _lowest_gripper_point(c) > floor - 2e-3
 
 
