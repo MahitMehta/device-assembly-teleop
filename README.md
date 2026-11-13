@@ -159,6 +159,23 @@ for 16 MB, and use it once allowed), then restart the services:
 echo 'net.core.rmem_max = 16777216' | sudo tee /etc/sysctl.d/60-ros2-dds.conf && sudo sysctl --system
 ```
 
+**Colour settings.** By default the camera picks exposure and white balance itself, which blows
+out bright parts (the white case) and shifts colour between demonstrations. To fix them, start
+`camera` and `rviz`, then adjust the running camera from a second shell on the laptop and watch the
+image:
+
+```bash
+docker compose run --rm ros ros2 param set /camera/camera rgb_camera.enable_auto_exposure false
+docker compose run --rm ros ros2 param set /camera/camera rgb_camera.exposure 100        # 0.1 ms units
+docker compose run --rm ros ros2 param set /camera/camera rgb_camera.gain 64
+docker compose run --rm ros ros2 param set /camera/camera rgb_camera.enable_auto_white_balance false
+docker compose run --rm ros ros2 param set /camera/camera rgb_camera.white_balance 4600.0  # kelvin
+```
+
+Aim for the white parts to keep their texture with the table still visible. Then put the values in
+`.env` (`CAMERA_EXPOSURE`, `CAMERA_GAIN`, `CAMERA_WHITE_BALANCE`) so every restart uses them, and
+restart `camera`.
+
 **RViz** shows the arm, the TF frames (including `tool0` -> `camera_link` once calibrated) and the
 wrist image. Run it on the laptop, so the raw images it views stay on that machine. Allow the
 container on the display first (once per login):

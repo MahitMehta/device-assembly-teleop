@@ -14,5 +14,30 @@ fi
 serial=()
 # The leading _ keeps ROS from reading an all-digit serial as a number.
 [ -n "${CAMERA_SERIAL:-}" ] && serial=("serial_no:=_${CAMERA_SERIAL}")
+
+# Colour exposure, gain and white balance from .env (empty = the camera's automatic setting).
+# rs_launch.py takes these only from a config file; it warns that they are "not supported"
+# but passes them to the node.
+settings=/tmp/camera_settings.yaml
+: > "$settings"
+number() { [[ "$2" =~ ^[0-9]+$ ]] || { echo "$1 must be a whole number, got '$2'" >&2; exit 1; }; }
+if [ -n "${CAMERA_EXPOSURE:-}" ]; then
+  number CAMERA_EXPOSURE "$CAMERA_EXPOSURE"
+  printf 'rgb_camera.enable_auto_exposure: false\nrgb_camera.exposure: %d\n' "$CAMERA_EXPOSURE" >> "$settings"
+fi
+if [ -n "${CAMERA_GAIN:-}" ]; then
+  number CAMERA_GAIN "$CAMERA_GAIN"
+  printf 'rgb_camera.gain: %d\n' "$CAMERA_GAIN" >> "$settings"
+fi
+if [ -n "${CAMERA_WHITE_BALANCE:-}" ]; then
+  number CAMERA_WHITE_BALANCE "$CAMERA_WHITE_BALANCE"
+  # A float: the camera steps white balance by 10 K, so the node declares it as a double.
+  printf 'rgb_camera.enable_auto_white_balance: false\nrgb_camera.white_balance: %d.0\n' "$CAMERA_WHITE_BALANCE" >> "$settings"
+fi
+config=()
+if [ -s "$settings" ]; then
+  echo "Colour camera settings:" >&2; cat "$settings" >&2
+  config=("config_file:=$settings")
+fi
 exec ros2 launch realsense2_camera rs_launch.py rgb_camera.color_profile:=640x480x30 \
-  depth_module.depth_profile:=640x480x30 align_depth.enable:=true "${serial[@]}" "$@"
+  depth_module.depth_profile:=640x480x30 align_depth.enable:=true "${serial[@]}" "${config[@]}" "$@"

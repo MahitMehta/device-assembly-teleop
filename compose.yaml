@@ -59,6 +59,9 @@ services:
     environment:
       <<: *ros-env
       CAMERA_SERIAL: ${CAMERA_SERIAL:-}   # .env: which RealSense is the wrist camera
+      CAMERA_EXPOSURE: ${CAMERA_EXPOSURE:-}           # .env: colour exposure, empty = auto
+      CAMERA_GAIN: ${CAMERA_GAIN:-}
+      CAMERA_WHITE_BALANCE: ${CAMERA_WHITE_BALANCE:-} # .env: kelvin, empty = auto
     entrypoint: [scripts/ros.sh, scripts/camera.sh]
 
   rviz:
