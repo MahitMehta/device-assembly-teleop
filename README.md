@@ -106,8 +106,9 @@ git pull                # after each push from the Mac
    registers (0-255). Speed defaults to 50; force defaults to 0, Low Force mode with Secure Grip off. The
    node sends nothing to the gripper until the trigger is first pulled, never activates it
    (activation moves the fingers: do it from the pendant), and `--no-gripper` leaves it alone.
-5. **Record** from a third shell: `docker compose run --rm record <task_name>`. Ctrl-C ends the
-   demonstration. Only topics on our domain are recorded, so start the wrist camera first
+5. **Record** from a third shell: `docker compose run --rm record <task_name>`. Enter (or Ctrl-C)
+   ends the demonstration; it then prints the length and the camera and joint-state counts, and
+   asks whether to keep it (`n` deletes it). Only topics on our domain are recorded, so start the wrist camera first
    (below).
 6. **When finished**, Ctrl-C the teleop node and then the driver, so the arm is free for others.
 
