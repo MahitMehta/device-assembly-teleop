@@ -205,3 +205,38 @@ class PlannerProcess:
         self._proc.join(timeout=2.0)
         if self._proc.is_alive():
             self._proc.terminate()
+
+
+class AutoStop:
+    """Decides that the task looks done: the gripper has closed and opened again in this run
+    (the part was released), and since then every plan has moved the tool less than `mm` over
+    the part of it that runs, for `seconds`. The policy has no success signal of its own; after
+    releasing, a demo-trained policy tends to hover, which is what this looks for."""
+
+    def __init__(self, seconds: float = 2.0, mm: float = 3.0):
+        self.seconds, self.mm = seconds, mm
+        self.reset()
+
+    def reset(self) -> None:
+        self.closed_once = self.released = False
+        self._still_since = None
+
+    def gripper(self, closed: bool) -> None:
+        if closed:
+            self.closed_once = True
+        elif self.closed_once:
+            self.released = True
+
+    def plan(self, chunk: Chunk, n_exec: int, t: float) -> bool:
+        """Feed each new plan; True once the task looks done."""
+        if not self.seconds or not self.released:
+            self._still_since = None
+            return False
+        p = chunk.poses[:n_exec, :3, 3]
+        span_mm = float(np.max(np.linalg.norm(p - p[0], axis=1))) * 1000
+        if span_mm >= self.mm:
+            self._still_since = None
+            return False
+        if self._still_since is None:
+            self._still_since = t
+        return t - self._still_since >= self.seconds

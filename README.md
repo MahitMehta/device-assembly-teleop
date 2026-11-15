@@ -248,8 +248,17 @@ limits as teleop. The predicted gripper opening closes the gripper below 30 mm a
 first close.
 
 Defaults are deliberately conservative: 0.10 m/s and 0.5 rad/s, a +/-25 cm box around the start
-pose (`--box-half-extent`), and a run pauses by itself after 90 s (`--max-run-s`) or if the newest
-camera frame is over 0.3 s old. Any hold (the same list as teleop) stops the run; Enter starts a
+pose (`--box-half-extent`), and a run pauses by itself after 60 s (`--max-run-s`) or if the newest
+camera frame is over 0.3 s old.
+
+The policy has no notion of success, so a run also pauses when the task looks done: the gripper
+has closed and reopened (the part was released) and every plan since has moved the tool under
+3 mm for 2 s (`--auto-stop-mm`, `--auto-stop-s`; `--auto-stop-s 0` turns this off).
+
+**Stopping it:** Enter pauses (the arm holds; the node keeps running). Ctrl-C stops sending
+commands at once and quits: the controller holds the last commanded position, at most one 8 ms
+step ahead, and the gripper stays as it is. The pendant's stop or the e-stop is the hardware
+stop; the node sees the mode change and holds. Any hold (the same list as teleop) stops the run; Enter starts a
 new one once the cause is gone.
 
 Test without hardware on domain 199, as for teleop: `fake_robot` in one shell, then

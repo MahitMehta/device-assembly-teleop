@@ -7,7 +7,8 @@ the arm or gripper. This node never switches controllers.
 
 Enter starts a run, Enter again pauses it (the arm holds where it is), Ctrl-C quits. Each run
 starts the policy fresh (no frames from before the pause). A run pauses by itself after
---max-run-s, and on any hold.
+--max-run-s, on any hold, and when the task looks done (--auto-stop-s: the gripper has closed and
+reopened, and the policy has planned almost no motion since).
 
 How the policy is driven (it was trained at 10 Hz):
   - every 0.1 s the newest wrist frame goes into the policy's frame history;
@@ -41,7 +42,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
                                             SAFETY_NORMAL, preflight, set_payload, zero_ft)
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
-from quest_teleop.utils.policy_runner import GripperHysteresis
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -65,6 +66,7 @@ class PolicyNode(Node):
         self.plan_ms = []
         self._resync = False
         self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
+        self.auto_stop = AutoStop(args.auto_stop_s, args.auto_stop_mm)
         self.last_log = 0.0
         self.mapping = Mapping(tcp_offset=np.eye(4))   # targets are tool0 poses, as in training
         self.limits = Limits(max_linear_speed=args.max_linear_speed, max_angular_speed=args.max_angular_speed,
@@ -149,6 +151,9 @@ class PolicyNode(Node):
                 continue
             if not was_running:          # a new run: no frames from before it
                 self.runner.reset()
+                self.auto_stop.reset()
+                if self.grip.closed:       # left closed by the previous run: opening counts as a release
+                    self.auto_stop.gripper(True)
                 k, was_running = 0, True
             with self.lock:
                 jpeg, age, q = self.jpeg, time.monotonic() - self.image_time, self.q_actual
@@ -170,6 +175,9 @@ class PolicyNode(Node):
                     self.chunk = chunk
                     self.plans += 1
                 self._publish_target(chunk.poses[0])
+                if self.auto_stop.plan(chunk, self.runner.n_exec, time.monotonic()):
+                    self._pause(f"task looks done: part released and the policy has planned under "
+                                f"{self.args.auto_stop_mm:g} mm of motion for {self.args.auto_stop_s:g} s")
             k += 1
 
     # ---- the control loop
@@ -228,6 +236,7 @@ class PolicyNode(Node):
             if changed is not None:
                 self.get_logger().info(f"gripper -> {'close' if changed else 'open'} (policy opening {opening * 1000:.0f} mm)")
                 self.grip_cmd_pub.publish(Float64(data=0.0 if changed else STROKE_M))
+                self.auto_stop.gripper(changed)
                 if self.gripper is not None:
                     self.gripper.command(changed)
             status = self.core.status
@@ -307,7 +316,10 @@ def parse_args(argv=None):
     p.add_argument("--payload-mass", type=float, default=0.925)
     p.add_argument("--payload-cog", type=float, nargs=3, default=[0.0, 0.0, 0.058], metavar=("X", "Y", "Z"))
     p.add_argument("--rate", type=float, default=125.0)
-    p.add_argument("--max-run-s", type=float, default=90.0, help="A run pauses by itself after this long (s)")
+    p.add_argument("--max-run-s", type=float, default=60.0, help="A run pauses by itself after this long (s)")
+    p.add_argument("--auto-stop-s", type=float, default=2.0,
+                   help="After the gripper has closed and reopened, pause once the policy has planned under --auto-stop-mm of motion for this long (s); 0 disables")
+    p.add_argument("--auto-stop-mm", type=float, default=3.0, help="mm: see --auto-stop-s")
     p.add_argument("--max-image-age", type=float, default=0.3, help="s; an older newest frame pauses the run")
     # Slower than teleop's defaults for first runs; the demos were teleoperated at up to 0.20 m/s.
     p.add_argument("--max-linear-speed", type=float, default=0.10, help="m/s")

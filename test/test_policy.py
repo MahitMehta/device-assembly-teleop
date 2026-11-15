@@ -72,3 +72,21 @@ def test_follow_stays_in_the_box():
         c.follow(goal, DT)
     assert c.target[0, 3] - start[0] == pytest.approx(0.02, abs=1e-6)
     assert c.status == "workspace limit"
+
+
+def test_auto_stop_waits_for_release_then_stillness():
+    from quest_teleop.utils.policy_runner import AutoStop
+    T0 = fk(HOME)
+    still = chunk_from(T0, [shifted(T0, dx=0.001)] * 15)
+    moving = chunk_from(T0, [shifted(T0, dx=0.01 * (i + 1)) for i in range(15)])
+    a = AutoStop(seconds=2.0, mm=3.0)
+    assert not a.plan(still, 8, 0.0) and not a.plan(still, 8, 5.0)   # never closed: keeps going
+    a.gripper(True)
+    assert not a.plan(still, 8, 6.0)                                 # closed, not released yet
+    a.gripper(False)
+    assert not a.plan(still, 8, 7.0)
+    assert not a.plan(moving, 8, 8.0)                                # motion resets the timer
+    assert not a.plan(still, 8, 8.8) and not a.plan(still, 8, 10.0)
+    assert a.plan(still, 8, 10.8)                                    # 2 s of stillness after release
+    a.reset()
+    assert not a.plan(still, 8, 20.0)
