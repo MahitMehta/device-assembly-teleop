@@ -218,6 +218,7 @@ class TeleopCore:
         self.q_cmd = np.array(q0, dtype=float)
         self.target = fk(self.q_cmd, self.map.tcp_offset)
         self.box_center = self.target[:3, 3].copy()
+        self.limit_detail = ""          # which workspace face the last "workspace limit" hit
         self.engaged = False
         self.latched_glitch = False
         self.status = "idle"
@@ -419,14 +420,23 @@ class TeleopCore:
         """Keep the TCP in the box, and every gripper point (for orientation R) above min_z."""
         half = self.lim.box_half_extent
         low, high = self.box_center - half, self.box_center + half
+        floor_binds = False
         if self.lim.min_z is not None:
             # Motion starting below the floor may stay there; it must not go lower.
             floor = min(self.lim.min_z, start[2, 3] + self._lowest(start[:3, :3]))
+            floor_binds = floor - self._lowest(R) > low[2]
             low[2] = max(low[2], floor - self._lowest(R))
             high[2] = max(high[2], low[2])
         clipped = np.clip(position, low, high)
         if not np.array_equal(clipped, position):
             self.status = "workspace limit"
+            sides = []   # for the log: which faces pushed the target back
+            for i, axis in enumerate("xyz"):
+                if position[i] < clipped[i]:
+                    sides.append("floor" if i == 2 and floor_binds else f"box -{axis}")
+                elif position[i] > clipped[i]:
+                    sides.append(f"box +{axis}")
+            self.limit_detail = ", ".join(sides)
         return clipped
 
     def _limited_target(self, desired: np.ndarray, dt: float) -> np.ndarray:

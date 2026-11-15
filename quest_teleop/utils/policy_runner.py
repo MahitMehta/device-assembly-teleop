@@ -70,15 +70,22 @@ def _slerp(Ra: np.ndarray, Rb: np.ndarray, f: float) -> np.ndarray:
 
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
-    doesn't flicker the gripper. None until the policy first asks to close: commanding open at
-    startup would drop anything held (as in teleop)."""
+    doesn't flicker the gripper, and a minimum hold: after a change the state stays for
+    `min_hold_s`, so the fingers actually close (or open) before the next plan can undo it.
+    Successive plans often disagree about the exact moment to grasp; without the hold one plan's
+    "close" is overturned by the next plan's "open" a few ms later, the jaws never move, the
+    camera never sees a grasp, and the policy hovers over the part. None until the policy first
+    asks to close: commanding open at startup would drop anything held (as in teleop)."""
 
-    def __init__(self, close_below: float = 0.030, open_above: float = 0.055):
-        self.close_below, self.open_above = close_below, open_above
+    def __init__(self, close_below: float = 0.030, open_above: float = 0.055, min_hold_s: float = 1.0):
+        self.close_below, self.open_above, self.min_hold_s = close_below, open_above, min_hold_s
         self.closed: bool | None = None
+        self._changed_at = -float("inf")
 
-    def update(self, opening: float) -> bool | None:
-        """Returns the new state when it changes, else None."""
+    def update(self, opening: float, t: float = 0.0) -> bool | None:
+        """Returns the new state when it changes, else None. t: seconds (monotonic) for the hold."""
+        if self.closed is not None and t - self._changed_at < self.min_hold_s:
+            return None
         if self.closed:
             want = opening < self.open_above
         else:
@@ -88,6 +95,7 @@ class GripperHysteresis:
         if want == self.closed:
             return None
         self.closed = want
+        self._changed_at = t
         return want
 
 

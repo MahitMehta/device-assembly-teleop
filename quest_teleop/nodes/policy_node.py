@@ -65,7 +65,8 @@ class PolicyNode(Node):
         self.plans = 0
         self.plan_ms = []
         self._resync = False
-        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
+        self._recenter = False
+        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above, args.grip_min_hold_s)
         self.auto_stop = AutoStop(args.auto_stop_s, args.auto_stop_mm)
         self.last_log = 0.0
         self.mapping = Mapping(tcp_offset=np.eye(4))   # targets are tool0 poses, as in training
@@ -125,6 +126,7 @@ class PolicyNode(Node):
             with self.lock:
                 self.chunk = None
             self._resync = True        # done by the control loop, which owns self.core
+            self._recenter = True      # the workspace box follows each run's start pose
             self.run_start = time.monotonic()
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
@@ -212,6 +214,9 @@ class PolicyNode(Node):
         if self._resync:   # run started or stopped: continue from where the arm actually is
             self._resync = False
             self.core.resync(q_actual)
+        if self._recenter:
+            self._recenter = False
+            self.core.box_center = self.core.target[:3, 3].copy()
 
         if self.args.live:
             reason = self._gate(q_actual)
@@ -232,7 +237,7 @@ class PolicyNode(Node):
                 self.force_baseline = self.force.copy()
             desired, opening = chunk.at(time.monotonic())
             q_cmd = self.core.follow(desired, 1.0 / self.args.rate)
-            changed = self.grip.update(opening)
+            changed = self.grip.update(opening, time.monotonic())
             if changed is not None:
                 self.get_logger().info(f"gripper -> {'close' if changed else 'open'} (policy opening {opening * 1000:.0f} mm)")
                 self.grip_cmd_pub.publish(Float64(data=0.0 if changed else STROKE_M))
@@ -240,6 +245,8 @@ class PolicyNode(Node):
                 if self.gripper is not None:
                     self.gripper.command(changed)
             status = self.core.status
+            if status == "workspace limit":
+                status += f" ({self.core.limit_detail})"
         elif self.running:
             status = "waiting for the first plan"
         else:
@@ -327,11 +334,12 @@ def parse_args(argv=None):
     p.add_argument("--max-joint-speed", type=float, default=0.5, help="rad/s")
     p.add_argument("--max-force-delta", type=float, default=30.0, help="N above the value when the run started")
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N")
-    p.add_argument("--box-half-extent", type=float, default=0.25, help="m the tool may move from its pose at startup, per axis")
+    p.add_argument("--box-half-extent", type=float, default=0.35, help="m the tool may move from where the run started, per axis (the demos went up to 30 cm)")
     p.add_argument("--min-z", type=float, default=0.01)
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
+    p.add_argument("--grip-min-hold-s", type=float, default=1.0, help="s the gripper keeps a new state before the policy may change it again")
     p.add_argument("--gripper-ip", default="10.168.4.208")
     p.add_argument("--gripper-sid", type=int, default=3)
     p.add_argument("--gripper-speed", type=int, default=50)
