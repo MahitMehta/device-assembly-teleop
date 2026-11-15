@@ -1,0 +1,10 @@
+# The teleop image plus what running the learned policy needs: PyTorch (CUDA) and the policy's
+# Python dependencies. The policy code itself is not baked in: each deployed policy directory
+# carries the code it was trained with (scripts/deploy_policy.sh). Build:
+#   docker compose --profile manual build policy
+FROM quest-teleop:humble
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && rm -rf /var/lib/apt/lists/*
+# Same torch/torchvision as the training image (pytorch/pytorch:2.5.1-cuda12.4). numpy stays 1.x
+# for the apt-installed OpenCV and ROS packages.
+RUN pip3 install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 torchvision==0.20.1 \
+ && pip3 install --no-cache-dir "numpy<2" scipy==1.14.1 diffusers==0.31.0 pyyaml==6.0.2

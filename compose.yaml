@@ -8,6 +8,8 @@
 #   docker compose run --rm camera                  # on the camera laptop, not coral
 #   docker compose run --rm ros <any command>       # e.g. ros2 topic list
 #   docker compose run --rm rviz                    # on a machine with a display (xhost +local:root first)
+#   docker compose run --rm policy /policies/real_v1         # learned policy, dry-run (Enter starts a run)
+#   docker compose run --rm policy /policies/real_v1 --live  # second shell after the driver, instead of teleop
 # Nothing starts by itself and nothing restarts: every service is behind the `manual`
 # profile, so a bare `docker compose up` does nothing.
 
@@ -77,6 +79,29 @@ services:
       DISPLAY: ${DISPLAY:-:0}
       QT_X11_NO_MITSHM: "1"
     entrypoint: [scripts/ros.sh, rviz2, -d, config/teleop.rviz]
+
+  policy:
+    # The learned policy (quest_teleop/nodes/policy_node.py) in place of teleop: same driver,
+    # controller, safety holds and limits. Needs the NVIDIA runtime (coral has it) and a policy
+    # directory from scripts/deploy_policy.sh, which puts them in ~/policies on coral.
+    <<: *ros
+    volumes:
+      - .:/teleop
+      - /data:/data
+      - ${HOME}/policies:/policies:ro
+    image: quest-teleop-policy:humble
+    build:
+      context: .
+      dockerfile: Dockerfile.policy
+    runtime: nvidia
+    environment:
+      <<: *ros-env
+      NVIDIA_VISIBLE_DEVICES: ${POLICY_GPU:-0}    # .env: which of coral's GPUs (shared: check nvidia-smi)
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.policy_node,
+                 --payload-mass, "${PAYLOAD_MASS:?}",
+                 --payload-cog, "${PAYLOAD_COG_X:?}", "${PAYLOAD_COG_Y:?}", "${PAYLOAD_COG_Z:?}"]
+    command: []
 
   record:
     <<: *ros

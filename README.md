@@ -10,6 +10,10 @@ Python code runs as `python3 -m quest_teleop...` from this folder, with no build
 | Path | Purpose |
 |---|---|
 | `quest_teleop/nodes/teleop_node.py` | ROS 2 node: Quest input, safety checks, arm and gripper commands (runs on `coral`) |
+| `quest_teleop/nodes/policy_node.py` | ROS 2 node: runs a learned policy (image-only DiT) in place of the Quest, with the same safety checks and limits (runs on `coral`, GPU) |
+| `quest_teleop/utils/policy_runner.py` | Loads a deployed policy, preprocesses wrist images as in training, times the planned waypoints (torch only for loading) |
+| `scripts/deploy_policy.sh` | Runs on the Mac: copies a trained policy from Gautschi to `coral:~/policies/<name>` with the code it was trained with |
+| `Dockerfile.policy` | The teleop image plus CUDA PyTorch, for the `policy` service |
 | `quest_teleop/nodes/fake_robot.py` | Driver stand-in for testing on an isolated ROS domain |
 | `quest_teleop/utils/core.py` | Kinematics, clutch, and limits (no ROS) |
 | `quest_teleop/utils/gripper.py` | Drives the Robotiq 2F-85 directly through the URCap socket on the UR controller (no ROS) |
@@ -204,6 +208,53 @@ wrist as much as you can about different axes between them. Then `s` + Enter sol
 the board's position spread is a few mm. Restart `camera`, which then publishes the transform to
 `/tf_static`, so it is in every recording. Keep the file in git (copy it to the Mac and commit it if
 the laptop can't push), so each recording's calibration can be traced.
+
+## Learned policy
+
+`policy_node` runs a policy trained in `DeviceAssembly/policy` (image-only DiT, wrist camera in,
+tool0 targets and gripper out) on the arm, **in place of** `teleop`: same driver, same
+`forward_position_controller`, same holds and limits (below). Only one of `teleop` and `policy`
+may run at a time.
+
+1. **Deploy** (on the Mac, after training on Gautschi): copies the checkpoint, its config and
+   training log, the dataset's `meta.json` and a snapshot of the policy code to
+   `coral:~/policies/<name>`, which the `policy` service sees as `/policies/<name>`.
+   ```bash
+   scripts/deploy_policy.sh real_v1                                         # final.pt
+   scripts/deploy_policy.sh real_v1 --checkpoint step_0080000.pt --name real_v1_80k
+   ```
+2. **Build** the image on `coral` once (PyTorch; rebuild only when `Dockerfile.policy` changes):
+   `docker compose --profile manual build policy`. `POLICY_GPU` in `.env` picks the GPU; they are
+   shared, so check `nvidia-smi` for one with a couple of GB free.
+3. **Start the driver and the wrist camera** as for teleop, and place the arm where the demos
+   started (gripper open, above the table, the clear piece and fixture in view).
+4. **Dry-run** (sends nothing; logs the plans and publishes `/policy/target_pose` for RViz):
+   ```bash
+   docker compose run --rm policy /policies/real_v1
+   ```
+   It loads the policy and runs one warm-up plan, then waits. **Enter** starts a run, Enter again
+   pauses it (the arm holds), Ctrl-C quits. Each run starts the policy fresh.
+5. **Live**, with someone at the e-stop and reduced speed on the pendant:
+   ```bash
+   docker compose run --rm policy /policies/real_v1 --live
+   ```
+
+How it runs the policy: every 0.1 s (the training rate) the newest wrist frame goes into its
+history; every 8 frames it plans 16 tool0 targets relative to the measured pose at that frame,
+on its own thread, while the arm keeps following the previous plan's later targets. The 125 Hz
+control loop interpolates between targets and moves through the same speed, box, floor and joint
+limits as teleop. The predicted gripper opening closes the gripper below 30 mm and opens it above
+55 mm (`--grip-close-below`, `--grip-open-above`); like teleop it never sends "open" before the
+first close.
+
+Defaults are deliberately conservative: 0.10 m/s and 0.5 rad/s, a +/-25 cm box around the start
+pose (`--box-half-extent`), and a run pauses by itself after 90 s (`--max-run-s`) or if the newest
+camera frame is over 0.3 s old. Any hold (the same list as teleop) stops the run; Enter starts a
+new one once the cause is gone.
+
+Test without hardware on domain 199, as for teleop: `fake_robot` in one shell, then
+`ROS_DOMAIN_ID=199 docker compose run --rm policy /policies/<name> --live --no-gripper`, with a
+recorded bag's camera topic replayed (`ros2 bag play <bag> --topics /camera/camera/color/image_raw/compressed`).
 
 ## Safety behaviour
 

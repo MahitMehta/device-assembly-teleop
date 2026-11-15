@@ -342,6 +342,25 @@ class TeleopCore:
         self.q_cmd = self._ik_step(out, dt)
         return self.q_cmd
 
+    def follow(self, desired: np.ndarray, dt: float) -> np.ndarray:
+        """Move toward a tool pose (4x4, base frame) chosen by something other than the hand,
+        e.g. a learned policy, under the same speed, workspace, floor and joint limits.
+
+        The workspace box stays centred on the startup pose; the floor check starts from the
+        current target, as for jogging.
+        """
+        self.engaged = False
+        self.latched_glitch = False
+        self._aligning = False
+        self._last_ctrl = None
+        self.status = "following"
+        start = self.target
+        out = self._limited_target(desired, dt)
+        out[:3, 3] = self._clip_to_workspace(out[:3, 3], out[:3, :3], start)
+        self.target = out
+        self.q_cmd = self._ik_step(out, dt)
+        return self.q_cmd
+
     def grip_motion(self) -> tuple[float, float, float]:
         """Target motion since the grip was pressed, as (forward, left, up) of the robot."""
         d = self.target[:3, 3] - self._tcp0[:3, 3]
