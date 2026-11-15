@@ -40,23 +40,13 @@ def test_chunk_gripper_switches_at_the_midpoint_between_waypoints():
 
 
 def test_gripper_hysteresis():
-    g = GripperHysteresis(close_below=0.03, open_above=0.055, min_hold_s=0.0)
+    g = GripperHysteresis(close_below=0.03, open_above=0.055)
     assert g.update(0.085) is None          # never commands "open" before the first close
     assert g.update(0.04) is None           # in the dead band
     assert g.update(0.02) is True           # close
     assert g.update(0.05) is None           # stays closed in the dead band
     assert g.update(0.06) is False          # open
     assert g.update(0.04) is None           # stays open in the dead band
-
-
-def test_gripper_holds_a_new_state_before_changing_again():
-    g = GripperHysteresis(close_below=0.03, open_above=0.055, min_hold_s=1.0)
-    assert g.update(0.0, 10.0) is True
-    assert g.update(0.085, 10.012) is None  # the next plan says "open" 12 ms later: ignored
-    assert g.update(0.085, 10.9) is None
-    assert g.closed is True
-    assert g.update(0.085, 11.0) is False   # after the hold it may open
-    assert g.update(0.0, 11.5) is None and g.update(0.0, 12.0) is True
 
 
 def test_follow_reaches_a_target_within_speed_limits():

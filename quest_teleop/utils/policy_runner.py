@@ -6,6 +6,9 @@ A deployed policy is a directory, made by scripts/deploy_policy.sh:
     <dir>/src/dit_policy  the policy code it was trained with (so code and weights always match)
     <dir>/meta.json       the training dataset's meta.json (stored image size), optional
 
+Policies trained with state inputs (config `state`) also need the measured tool0 pose and jaw
+gap with each image; image-only ones ignore them.
+
 The pieces that need no torch (preprocessing, waypoint timing, gripper hysteresis) are here too,
 so they can be tested without a GPU.
 """
@@ -70,22 +73,15 @@ def _slerp(Ra: np.ndarray, Rb: np.ndarray, f: float) -> np.ndarray:
 
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
-    doesn't flicker the gripper, and a minimum hold: after a change the state stays for
-    `min_hold_s`, so the fingers actually close (or open) before the next plan can undo it.
-    Successive plans often disagree about the exact moment to grasp; without the hold one plan's
-    "close" is overturned by the next plan's "open" a few ms later, the jaws never move, the
-    camera never sees a grasp, and the policy hovers over the part. None until the policy first
-    asks to close: commanding open at startup would drop anything held (as in teleop)."""
+    doesn't flicker the gripper. None until the policy first asks to close: commanding open at
+    startup would drop anything held (as in teleop)."""
 
-    def __init__(self, close_below: float = 0.030, open_above: float = 0.055, min_hold_s: float = 1.0):
-        self.close_below, self.open_above, self.min_hold_s = close_below, open_above, min_hold_s
+    def __init__(self, close_below: float = 0.030, open_above: float = 0.055):
+        self.close_below, self.open_above = close_below, open_above
         self.closed: bool | None = None
-        self._changed_at = -float("inf")
 
-    def update(self, opening: float, t: float = 0.0) -> bool | None:
-        """Returns the new state when it changes, else None. t: seconds (monotonic) for the hold."""
-        if self.closed is not None and t - self._changed_at < self.min_hold_s:
-            return None
+    def update(self, opening: float) -> bool | None:
+        """Returns the new state when it changes, else None."""
         if self.closed:
             want = opening < self.open_above
         else:
@@ -95,7 +91,6 @@ class GripperHysteresis:
         if want == self.closed:
             return None
         self.closed = want
-        self._changed_at = t
         return want
 
 
@@ -116,12 +111,16 @@ class DiTRunner:
         self.dt = 1.0 / 10.0   # the dataset's rate (convert_rosbags --hz)
         self.n_exec = self.policy.n_exec
         self.horizon = self.policy.cfg["action_horizon"]
+        self.state_keys = tuple(getattr(self.policy, "state_keys", ()))
 
     def reset(self) -> None:
         self.policy.reset()
 
-    def observe(self, rgb: np.ndarray) -> None:
-        self.policy.observe(rgb)
+    def observe(self, rgb: np.ndarray, tool0: np.ndarray | None = None, gripper_width: float | None = None) -> None:
+        if self.state_keys:
+            self.policy.observe(rgb, tool0, gripper_width)
+        else:
+            self.policy.observe(rgb)
 
     def plan(self, tool0: np.ndarray, t_obs: float) -> Chunk:
         """Plan from the frames observed so far; tool0 is the measured pose when the last one was taken."""
@@ -131,7 +130,7 @@ class DiTRunner:
 
     def warmup(self) -> None:
         """One plan on a blank image, so CUDA kernels compile before the arm moves."""
-        self.observe(np.zeros((*self.hw, 3), np.uint8))
+        self.observe(np.zeros((*self.hw, 3), np.uint8), np.eye(4), 0.085)
         self.policy.plan()
         self.reset()
 
@@ -139,7 +138,7 @@ class DiTRunner:
 def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) -> None:
     """Child process: owns torch and the policy, so planning never competes with the ROS
     callbacks and control loop for the interpreter lock. Messages:
-      ("observe", jpeg)      decode, resize, append to the frame history (no reply)
+      ("observe", jpeg, tool0, width)  decode, resize, append to the history (no reply)
       ("plan", tool0, t)     reply ("chunk", Chunk, ms)
       ("reset",)             clear the frame history (no reply)
     On start it replies ("ready", info) after a warm-up plan, or ("error", text).
@@ -151,7 +150,7 @@ def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) ->
         r = DiTRunner(policy_dir, checkpoint, device)
         t0 = time.monotonic(); r.warmup()
         conn.send(("ready", {"device": str(r.policy.dev), "hw": r.hw, "horizon": r.horizon, "n_exec": r.n_exec,
-                             "dt": r.dt, "warmup_ms": (time.monotonic() - t0) * 1000}))
+                             "dt": r.dt, "state": list(r.state_keys), "warmup_ms": (time.monotonic() - t0) * 1000}))
     except Exception as e:  # report, don't hang the parent
         conn.send(("error", repr(e)))
         return
@@ -162,7 +161,7 @@ def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) ->
             return
         if msg[0] == "observe":
             try:
-                r.observe(preprocess(msg[1], r.hw))
+                r.observe(preprocess(msg[1], r.hw), msg[2], msg[3])
             except ValueError:
                 pass   # an undecodable frame: keep the history as it was
         elif msg[0] == "plan":
@@ -191,9 +190,10 @@ class PlannerProcess:
             raise RuntimeError(f"policy process failed: {info}")
         self.info = info
         self.dt, self.n_exec, self.horizon, self.hw = info["dt"], info["n_exec"], info["horizon"], tuple(info["hw"])
+        self.state_keys = tuple(info.get("state", ()))
 
-    def observe(self, jpeg: bytes) -> None:
-        self._conn.send(("observe", jpeg))
+    def observe(self, jpeg: bytes, tool0: np.ndarray | None = None, gripper_width: float | None = None) -> None:
+        self._conn.send(("observe", jpeg, tool0, gripper_width))
 
     def reset(self) -> None:
         self._conn.send(("reset",))

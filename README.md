@@ -245,8 +245,7 @@ on its own thread, while the arm keeps following the previous plan's later targe
 control loop interpolates between targets and moves through the same speed, box, floor and joint
 limits as teleop. The predicted gripper opening closes the gripper below 30 mm and opens it above
 55 mm (`--grip-close-below`, `--grip-open-above`); like teleop it never sends "open" before the
-first close. After a change the gripper keeps its state for 1 s (`--grip-min-hold-s`), so one plan's
-"close" isn't undone by the next plan's "open" before the fingers move.
+first close.
 
 Defaults are deliberately conservative: 0.10 m/s and 0.5 rad/s, a +/-35 cm box around the pose each
 run starts from (`--box-half-extent`; the demos moved up to 30 cm); the log names the face it hit,

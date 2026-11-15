@@ -46,6 +46,9 @@ from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
+# Jaw gap guesses for a gripper_width policy input when the gripper reports nothing (--no-gripper):
+# in the demos the jaws read 17 mm closed on the clear piece and 84 mm open.
+GUESS_CLOSED_M, GUESS_OPEN_M = 0.017, 0.084
 
 
 class PolicyNode(Node):
@@ -66,7 +69,7 @@ class PolicyNode(Node):
         self.plan_ms = []
         self._resync = False
         self._recenter = False
-        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above, args.grip_min_hold_s)
+        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
         self.auto_stop = AutoStop(args.auto_stop_s, args.auto_stop_mm)
         self.last_log = 0.0
         self.mapping = Mapping(tcp_offset=np.eye(4))   # targets are tool0 poses, as in training
@@ -163,7 +166,7 @@ class PolicyNode(Node):
                 self._pause(f"camera image {'missing' if jpeg is None else f'{age * 1000:.0f} ms old'}")
                 continue
             t_obs, tool0 = time.monotonic(), fk(q)
-            self.runner.observe(jpeg)            # decoded and resized in the policy process
+            self.runner.observe(jpeg, tool0, self._jaw_gap())   # decoded and resized in the policy process
             if k % self.runner.n_exec == 0:
                 try:
                     chunk, ms = self.runner.plan(tool0, t_obs)
@@ -181,6 +184,15 @@ class PolicyNode(Node):
                     self._pause(f"task looks done: part released and the policy has planned under "
                                 f"{self.args.auto_stop_mm:g} mm of motion for {self.args.auto_stop_s:g} s")
             k += 1
+
+    def _jaw_gap(self) -> float:
+        """Measured jaw gap (m) for policies with a gripper_width input: the gripper's own reading,
+        as recorded in the demos (/teleop/gripper_position). With no reading (--no-gripper, or not
+        connected yet) it guesses from the last command: the demos' gap when holding the piece, or open."""
+        state = self.gripper.state if self.gripper is not None else None
+        if state is not None:
+            return float(state[0])
+        return GUESS_CLOSED_M if self.grip.closed else GUESS_OPEN_M
 
     # ---- the control loop
     def _gate(self, q_actual) -> str | None:
@@ -237,7 +249,7 @@ class PolicyNode(Node):
                 self.force_baseline = self.force.copy()
             desired, opening = chunk.at(time.monotonic())
             q_cmd = self.core.follow(desired, 1.0 / self.args.rate)
-            changed = self.grip.update(opening, time.monotonic())
+            changed = self.grip.update(opening)
             if changed is not None:
                 self.get_logger().info(f"gripper -> {'close' if changed else 'open'} (policy opening {opening * 1000:.0f} mm)")
                 self.grip_cmd_pub.publish(Float64(data=0.0 if changed else STROKE_M))
@@ -339,7 +351,6 @@ def parse_args(argv=None):
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
-    p.add_argument("--grip-min-hold-s", type=float, default=1.0, help="s the gripper keeps a new state before the policy may change it again")
     p.add_argument("--gripper-ip", default="10.168.4.208")
     p.add_argument("--gripper-sid", type=int, default=3)
     p.add_argument("--gripper-speed", type=int, default=50)
@@ -356,6 +367,10 @@ def main(argv=None) -> int:
     i = runner.info
     print(f"Policy {args.policy_dir}/{args.checkpoint} on {i['device']}: images {runner.hw}, plans {runner.horizon} steps, "
           f"runs {runner.n_exec} before replanning; warm-up plan {i['warmup_ms']:.0f} ms", flush=True)
+    print(f"Inputs: wrist images{''.join(', ' + k for k in runner.state_keys)}"
+          + (" (jaw gap guessed from the commands: no gripper connection without --live, or --no-gripper)"
+             if "gripper_width" in runner.state_keys and (args.no_gripper or not args.live) else ""),
+          flush=True)
 
     rclpy.init()
     node = PolicyNode(args, runner)
