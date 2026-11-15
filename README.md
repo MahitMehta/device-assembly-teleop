@@ -256,6 +256,15 @@ The policy has no notion of success, so a run also pauses when the task looks do
 has closed and reopened (the part was released) and every plan since has moved the tool under
 3 mm for 2 s (`--auto-stop-mm`, `--auto-stop-s`; `--auto-stop-s 0` turns this off).
 
+**Camera mount check.** The camera clamps round the wrist, so a re-mount can leave it turned a few
+degrees from where the demos were recorded, and a policy only copes with the turn it was trained
+for (`train.mount_rotation` in its config; about 1 deg without it). Before each run, with the gripper
+open, the node finds the left finger in the image and compares its angle with the demos'
+(`config/wrist_mount_reference.json`, from `python3 -m quest_teleop.utils.mount_check <dataset> --write`),
+to about +/-0.5 deg. It logs e.g. `camera mount turned +1.8 deg from the demos (policy tolerates +/-3)`;
+out of range, a live run doesn't start (`--mount-tolerance-deg`, `--skip-mount-check`). With the
+gripper closed or the finger not found it only warns.
+
 **Stopping it:** Enter pauses (the arm holds; the node keeps running). Ctrl-C stops sending
 commands at once and quits: the controller holds the last commanded position, at most one 8 ms
 step ahead, and the gripper stays as it is. The pendant's stop or the e-stop is the hardware

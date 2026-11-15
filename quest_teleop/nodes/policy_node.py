@@ -42,7 +42,8 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
                                             SAFETY_NORMAL, preflight, set_payload, zero_ft)
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis
+from quest_teleop.utils import mount_check
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, preprocess
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -60,6 +61,11 @@ class PolicyNode(Node):
         self.robot_mode = self.safety_mode = self.speed_scaling = None
         self.force = self.torque = self.force_baseline = None
         self.jpeg, self.image_time = None, 0.0
+        self.image_seq = 0
+        self.mount_ref = mount_check.load_reference()
+        # Mount turn the policy should cope with: what it was trained with, else ~1 deg (only the crop shifts).
+        self.mount_tolerance = (args.mount_tolerance_deg if args.mount_tolerance_deg is not None
+                                else runner.mount_rotation_deg or 1.0)
         self.core = None
         self.running = False          # a run is in progress (Enter toggles)
         self.run_start = 0.0
@@ -115,6 +121,7 @@ class PolicyNode(Node):
     def _on_image(self, msg: CompressedImage) -> None:
         with self.lock:   # keep only the newest; decode at 10 Hz in the policy thread
             self.jpeg, self.image_time = bytes(msg.data), time.monotonic()
+            self.image_seq += 1
 
     # ---- run control
     def toggle(self) -> None:
@@ -125,6 +132,8 @@ class PolicyNode(Node):
             self.fault = None   # the next Enter tries again; the gate re-checks every tick
         elif self.core is None:
             self.get_logger().warning("Not starting: no joint states yet")
+        elif not self._mount_ok():
+            pass
         else:
             with self.lock:
                 self.chunk = None
@@ -133,6 +142,50 @@ class PolicyNode(Node):
             self.run_start = time.monotonic()
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
+
+    def _recent_frames(self, n: int = 5, timeout: float = 1.5) -> list[np.ndarray]:
+        """The next n distinct camera frames, at the size the policy sees."""
+        frames, last, t_end = [], None, time.monotonic() + timeout
+        while len(frames) < n and time.monotonic() < t_end:
+            with self.lock:
+                jpeg, seq = self.jpeg, self.image_seq
+            if jpeg is not None and seq != last:
+                last = seq
+                try:
+                    frames.append(preprocess(jpeg, self.runner.hw))
+                except ValueError:
+                    pass
+            time.sleep(0.02)
+        return frames
+
+    def _mount_ok(self) -> bool:
+        """Before a run: is the camera mount turned within what the policy tolerates? Measured from
+        the open left finger (utils/mount_check.py). A live run doesn't start if it's out of range;
+        if it can't be measured (gripper closed, finger not found) it only warns."""
+        if self.args.skip_mount_check or self.mount_ref is None:
+            return True
+        log = self.get_logger()
+        state = self.gripper.state if self.gripper is not None else None
+        if self.grip.closed or (state is not None and state[0] < 0.08):
+            log.warning("camera mount: not checked (gripper closed; the reference is with it open)")
+            return True
+        frames = self._recent_frames()
+        if len(frames) < 2:
+            log.warning("camera mount: not checked (no camera frames)")
+            return True
+        ok, msg = mount_check.check(frames, self.mount_ref, self.mount_tolerance)
+        if ok is None:
+            log.warning(msg)
+            return True
+        if ok:
+            log.info(msg)
+            return True
+        if self.args.live:
+            log.error(f"Not starting: {msg}. Turn the mount back (or deploy a policy trained with a wider "
+                      f"mount_rotation), or pass --skip-mount-check.")
+            return False
+        log.warning(f"{msg} (dry run: starting anyway)")
+        return True
 
     def _pause(self, why: str) -> None:
         if self.running:
@@ -356,6 +409,10 @@ def parse_args(argv=None):
     p.add_argument("--gripper-speed", type=int, default=50)
     p.add_argument("--gripper-force", type=int, default=0)
     p.add_argument("--no-gripper", action="store_true")
+    p.add_argument("--mount-tolerance-deg", type=float, default=None,
+                   help="Largest camera-mount turn (deg, measured from the gripper finger) a live run may start with; "
+                        "default: the policy's trained mount_rotation, else 1")
+    p.add_argument("--skip-mount-check", action="store_true", help="Start runs without checking the camera mount")
     return p.parse_args(argv)
 
 
@@ -367,6 +424,14 @@ def main(argv=None) -> int:
     i = runner.info
     print(f"Policy {args.policy_dir}/{args.checkpoint} on {i['device']}: images {runner.hw}, plans {runner.horizon} steps, "
           f"runs {runner.n_exec} before replanning; warm-up plan {i['warmup_ms']:.0f} ms", flush=True)
+    if args.skip_mount_check:
+        print("Camera mount check: off (--skip-mount-check)", flush=True)
+    elif mount_check.load_reference() is None:
+        print(f"Camera mount check: off (no {mount_check.REFERENCE_PATH})", flush=True)
+    else:
+        tol = args.mount_tolerance_deg if args.mount_tolerance_deg is not None else runner.mount_rotation_deg or 1.0
+        print(f"Camera mount check before each run: within +/-{tol:g} deg of the demos "
+              f"({'trained with' if runner.mount_rotation_deg else 'no'} mount-rotation augmentation)", flush=True)
     print(f"Inputs: wrist images{''.join(', ' + k for k in runner.state_keys)}"
           + (" (jaw gap guessed from the commands: no gripper connection without --live, or --no-gripper)"
              if "gripper_width" in runner.state_keys and (args.no_gripper or not args.live) else ""),

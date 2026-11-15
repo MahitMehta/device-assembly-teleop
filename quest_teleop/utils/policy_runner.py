@@ -150,7 +150,8 @@ def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) ->
         r = DiTRunner(policy_dir, checkpoint, device)
         t0 = time.monotonic(); r.warmup()
         conn.send(("ready", {"device": str(r.policy.dev), "hw": r.hw, "horizon": r.horizon, "n_exec": r.n_exec,
-                             "dt": r.dt, "state": list(r.state_keys), "warmup_ms": (time.monotonic() - t0) * 1000}))
+                             "dt": r.dt, "state": list(r.state_keys), "warmup_ms": (time.monotonic() - t0) * 1000,
+                             "mount_rotation_deg": float(((r.policy.cfg.get("train") or {}).get("mount_rotation") or {}).get("deg", 0.0))}))
     except Exception as e:  # report, don't hang the parent
         conn.send(("error", repr(e)))
         return
@@ -191,6 +192,7 @@ class PlannerProcess:
         self.info = info
         self.dt, self.n_exec, self.horizon, self.hw = info["dt"], info["n_exec"], info["horizon"], tuple(info["hw"])
         self.state_keys = tuple(info.get("state", ()))
+        self.mount_rotation_deg = float(info.get("mount_rotation_deg", 0.0))   # trained-in mount-turn augmentation
 
     def observe(self, jpeg: bytes, tool0: np.ndarray | None = None, gripper_width: float | None = None) -> None:
         self._conn.send(("observe", jpeg, tool0, gripper_width))

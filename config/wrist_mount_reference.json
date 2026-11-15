@@ -1,0 +1,11 @@
+{
+  "finger_xy": [
+    100.28,
+    172.73
+  ],
+  "finger_angle_deg": -76.84,
+  "finger_area": 619,
+  "spread_deg": 0.28,
+  "episodes": 45,
+  "source": "clear_piece_v2 (45 demos, 2026-11-13/14), first open-gripper frames"
+}
