@@ -65,6 +65,8 @@ class PolicyNode(Node):
         self.args, self.runner = args, runner
         self.lock = threading.Lock()
         self.q_actual, self.joint_time = None, 0.0
+        self.tcp_pose, self.tcp_time = None, 0.0   # the driver's measured tool0 (the controller's calibrated kinematics)
+        self._anchor_logged = False
         self.robot_mode = self.safety_mode = self.speed_scaling = None
         self.force = self.torque = self.force_baseline = None
         # Wrist force/torque as a policy input (`wrench` in the policy's state): filtered and zeroed
@@ -116,6 +118,7 @@ class PolicyNode(Node):
 
         sensors, control = MutuallyExclusiveCallbackGroup(), MutuallyExclusiveCallbackGroup()
         self.create_subscription(JointState, "/joint_states", self._on_joints, qos_profile_sensor_data, callback_group=sensors)
+        self.create_subscription(PoseStamped, "/tcp_pose_broadcaster/pose", self._on_tcp, qos_profile_sensor_data, callback_group=sensors)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(RobotMode, "/io_and_status_controller/robot_mode", lambda m: setattr(self, "robot_mode", m.mode), latched)
         self.create_subscription(SafetyMode, "/io_and_status_controller/safety_mode", lambda m: setattr(self, "safety_mode", m.mode), latched)
@@ -138,6 +141,35 @@ class PolicyNode(Node):
         self._thinker = threading.Thread(target=self._policy_loop, daemon=True)
 
     # ---- inputs
+    def _on_tcp(self, msg: PoseStamped) -> None:
+        p, o = msg.pose.position, msg.pose.orientation
+        T = np.eye(4)
+        T[:3, :3] = Rotation.from_quat([o.x, o.y, o.z, o.w]).as_matrix()
+        T[:3, 3] = [p.x, p.y, p.z]
+        with self.lock:
+            self.tcp_pose, self.tcp_time = T, time.monotonic()
+
+    def _anchor(self, q: np.ndarray) -> np.ndarray | None:
+        """tool0 for the policy (plan anchor and tilt input). The demos' actions are
+        inv(driver's tcp_pose) @ teleop's command, and the two come from different kinematics (the
+        controller's calibrated model vs core.fk's nominal one, ~1.2 mm and 0.3 deg apart here), so a
+        still arm reads as a constant small action. Anchored on fk(q) instead, that action moves the
+        arm every plan: the steady creep and tilt. --anchor driver uses the same pose as training."""
+        if self.args.anchor == "fk":
+            return fk(q)
+        with self.lock:
+            T, age = self.tcp_pose, time.monotonic() - self.tcp_time
+        if T is None or age > 0.1:
+            return None
+        if not self._anchor_logged:
+            self._anchor_logged = True
+            F = fk(q)
+            d = F[:3, :3].T @ (T[:3, 3] - F[:3, 3]) * 1000
+            ang = np.degrees(np.linalg.norm(Rotation.from_matrix(F[:3, :3].T @ T[:3, :3]).as_rotvec()))
+            self.get_logger().info(f"Policy anchor: driver tcp_pose, {np.linalg.norm(d):.1f} mm ({d[0]:+.1f},{d[1]:+.1f},{d[2]:+.1f}) "
+                                   f"and {ang:.2f} deg from the nominal fk(q)")
+        return T
+
     def _on_joints(self, msg: JointState) -> None:
         index = {n: i for i, n in enumerate(msg.name)}
         if not all(n in index for n in JOINT_NAMES):
@@ -338,7 +370,11 @@ class PolicyNode(Node):
             if jpeg is None or age > self.args.max_image_age:
                 self._pause(f"camera image {'missing' if jpeg is None else f'{age * 1000:.0f} ms old'}")
                 continue
-            t_obs, tool0 = time.monotonic(), fk(q)
+            t_obs, tool0_fk = time.monotonic(), fk(q)
+            tool0 = self._anchor(q)
+            if tool0 is None:
+                self._pause("no /tcp_pose_broadcaster/pose in the last 0.1 s (needed for --anchor driver)")
+                continue
             comp_at_obs = self.comp.offset.copy()   # already in the measured pose (--compliance on)
             wrench = None
             if self.uses_wrench:
@@ -362,7 +398,7 @@ class PolicyNode(Node):
                 if self.args.tool_down:
                     chunk = tool_down(chunk)
                 if self.grip.closed:      # holding the piece: no creeping sideways on the way down
-                    chunk, side, dropped = xy_deadband(chunk, tool0, self.runner.n_exec, self.args.hold_xy_deadband_mm)
+                    chunk, side, dropped = xy_deadband(chunk, tool0_fk, self.runner.n_exec, self.args.hold_xy_deadband_mm)
                     self.plan_side = (side, dropped)
                 else:
                     self.plan_side = None
@@ -654,6 +690,9 @@ def parse_args(argv=None):
     p.add_argument("--hold-xy-deadband-mm", type=float, default=2.0,
                    help="While holding the piece, a mostly-downward plan that moves sideways less than this (mm) goes "
                         "straight down instead (demos: last 3 cm of the placing descent median 0.1 mm sideways); 0 disables")
+    p.add_argument("--anchor", choices=("driver", "fk"), default="driver",
+                   help="tool0 the policy plans from: 'driver' (/tcp_pose_broadcaster/pose, as in training) or 'fk' "
+                        "(nominal kinematics; makes a still arm creep ~1.2 mm and tilt ~0.3 deg per plan here)")
     p.add_argument("--compliance", choices=("off", "log", "on"), default="off",
                    help="While holding the piece: slide away from where the wrist torque says it touches, and stop "
                         "descending past --comp-push-limit. 'log' only computes and logs it")

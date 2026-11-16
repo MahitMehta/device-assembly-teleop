@@ -267,6 +267,12 @@ may run at a time.
    docker compose run --rm policy /policies/real_v1 --live
    ```
 
+The policy plans from the driver's `/tcp_pose_broadcaster/pose` (`--anchor driver`), as in training:
+the demos' actions are `inv(driver pose) @ teleop command`, and the driver's (calibrated) and
+`core.fk`'s (nominal) kinematics are ~1.2 mm and 0.3 deg apart, so a still arm reads as that small
+action. Planned from `fk(q)` (`--anchor fk`) it moved the arm that much every plan: a steady creep
+back and a building tilt, which `--tool-down` and the xy deadband only hid.
+
 How it runs the policy: every 0.1 s (the training rate) the newest wrist frame goes into its
 history; every 8 frames it plans 16 tool0 targets relative to the measured pose at that frame,
 on its own thread, while the arm keeps following the previous plan's later targets. The 125 Hz

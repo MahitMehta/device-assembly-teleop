@@ -349,3 +349,18 @@ def test_edge_toward_mode_moves_toward_the_touching_edge():
     c = _press_test_compliance(speed=0.002, edge_dir=1.0)     # gated off with real sideways force
     _settle(c, np.r_[[-5.0, -0.6, -2.5], [0.08, -0.87, -0.48]])
     assert c.path == "force"
+
+
+def test_policy_anchor_must_match_the_training_frame():
+    # Demos: action = inv(driver pose) @ command, with command in nominal-fk terms. With the two
+    # kinematic models apart by C, holding still trains the action inv(C). Executed from the fk pose
+    # it moves the arm by inv(C) every plan; from the driver pose it stays put.
+    from quest_teleop.utils.core import matrix_from_rotvec
+    fk_pose = np.eye(4); fk_pose[:3, :3] = matrix_from_rotvec(np.array([np.pi, 0.0, 0.3])); fk_pose[:3, 3] = [-0.38, 0.0, 0.35]
+    C = np.eye(4); C[:3, :3] = matrix_from_rotvec(np.radians([0.17, -0.25, 0.0])); C[:3, 3] = [0.0004, -0.001, -0.0012]
+    driver = fk_pose @ C
+    still_action = np.linalg.inv(driver) @ fk_pose               # what the demos teach for "hold still"
+    assert np.linalg.norm(still_action[:2, 3]) > 0.001           # ~1 mm, as measured in the dataset
+    assert np.allclose(driver @ still_action, fk_pose)            # anchored on the driver pose: no motion
+    moved = fk_pose @ still_action                                # anchored on fk: a step every plan
+    assert np.linalg.norm(moved[:3, 3] - fk_pose[:3, 3]) > 0.001
