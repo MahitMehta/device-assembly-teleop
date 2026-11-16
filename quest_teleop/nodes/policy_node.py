@@ -6,8 +6,7 @@ Dry-run is the default: it plans and logs and publishes /policy/target_pose, but
 the arm or gripper. This node never switches controllers.
 
 Enter starts a run, Enter again pauses it (the arm holds where it is), B (while paused, live only)
-moves the arm back to the demos' start pose (--home-joints), Ctrl-C quits. --tool-down keeps the
-planned poses pointing straight down. Each run
+moves the arm back to the demos' start pose (--home-joints), Ctrl-C quits. Each run
 starts the policy fresh (no frames from before the pause). A run pauses by itself after
 --max-run-s, on any hold, and when the task looks done (--auto-stop-s: the gripper has closed and
 reopened, and the policy has planned almost no motion since).
@@ -47,7 +46,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband, ContactCompliance, SpiralSearch, contact_descent
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, ContactCompliance, SpiralSearch, contact_descent
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -89,8 +88,8 @@ class PolicyNode(Node):
         self.plan_ms = []
         self.opening = self.min_opening = None   # policy's predicted jaw opening (m): now, and lowest this run
         self.homing = False           # moving back to --home-joints (B), between runs
-        self.plan_tilt = None         # (deg, lean) the latest plan asked for, before --tool-down
-        self.plan_side = None         # (mm, dropped) the latest plan's sideways move, and if --hold-xy-deadband-mm dropped it
+        self.plan_tilt = None         # (deg, lean) the most tilted pose the latest plan asks for
+        self.plan_side = None         # mm: the latest plan's largest sideways move (~0 when holding still)
         self.comp = ContactCompliance(speed=0.0 if args.comp_edge == "off" else args.comp_speed_mm_s / 1000,
                                       edge_dir=1.0 if args.comp_edge == "toward" else -1.0, contact_z=args.comp_contact_z,
                                       min_fz=args.comp_min_fz, min_r=args.comp_min_r_mm / 1000,
@@ -395,13 +394,8 @@ class PolicyNode(Node):
                     continue
                 # What the policy asked for: the most tilted pose in the part of the plan that runs.
                 self.plan_tilt = max((tilt_of(T[:3, :3]) for T in chunk.poses[:self.runner.n_exec]), key=lambda t: t[0])
-                if self.args.tool_down:
-                    chunk = tool_down(chunk)
-                if self.grip.closed:      # holding the piece: no creeping sideways on the way down
-                    chunk, side, dropped = xy_deadband(chunk, tool0_fk, self.runner.n_exec, self.args.hold_xy_deadband_mm)
-                    self.plan_side = (side, dropped)
-                else:
-                    self.plan_side = None
+                p = chunk.poses[:self.runner.n_exec, :2, 3] - tool0_fk[:2, 3]
+                self.plan_side = float(np.max(np.linalg.norm(p, axis=1))) * 1000
                 chunk.comp_at_obs = comp_at_obs
                 with self.lock:
                     self.chunk = chunk
@@ -577,12 +571,11 @@ class PolicyNode(Node):
                     deg, lean = tilt_of(fk(q)[:3, :3])
                     pdeg, plean = self.plan_tilt
                     extra += (f" tilt={deg:.1f}deg lean=({lean[0]:+.2f},{lean[1]:+.2f})"
-                              f" planned={pdeg:.1f}deg lean=({plean[0]:+.2f},{plean[1]:+.2f})"
-                              + (" [tool-down]" if self.args.tool_down else ""))
+                              f" planned={pdeg:.1f}deg lean=({plean[0]:+.2f},{plean[1]:+.2f})")
                 if self.args.compliance != "off" and self.grip.closed:
                     extra += self._comp_text()
                 if self.plan_side is not None:
-                    extra += f" side={self.plan_side[0]:.1f}mm{' (dropped)' if self.plan_side[1] else ''}"
+                    extra += f" side={self.plan_side:.1f}mm"
                 if self.opening is not None:
                     extra += (f" opening={self.opening * 1000:.0f}mm (min {self.min_opening * 1000:.0f},"
                               f" closes <{self.args.grip_close_below * 1000:.0f})")
@@ -684,12 +677,6 @@ def parse_args(argv=None):
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N")
     p.add_argument("--box-half-extent", type=float, default=0.35, help="m the tool may move from where the run started, per axis (the demos went up to 30 cm)")
     p.add_argument("--min-z", type=float, default=0.01)
-    p.add_argument("--tool-down", action="store_true",
-                   help="Keep every planned pose pointing straight down (only the predicted yaw is used), as in the "
-                        "clear-piece demos (all within 0.3 deg of vertical at the grasp)")
-    p.add_argument("--hold-xy-deadband-mm", type=float, default=2.0,
-                   help="While holding the piece, a mostly-downward plan that moves sideways less than this (mm) goes "
-                        "straight down instead (demos: last 3 cm of the placing descent median 0.1 mm sideways); 0 disables")
     p.add_argument("--anchor", choices=("driver", "fk"), default="driver",
                    help="tool0 the policy plans from: 'driver' (/tcp_pose_broadcaster/pose, as in training) or 'fk' "
                         "(nominal kinematics; makes a still arm creep ~1.2 mm and tilt ~0.3 deg per plan here)")

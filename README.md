@@ -238,13 +238,9 @@ may run at a time.
    median start of the 45 clear-piece demos) at `--home-speed` (0.3 rad/s), all joints arriving
    together; B again stops it. It refuses if a joint would turn more than `--home-max-move`
    (1.5 rad), and stops on any hold or if the path would go below the floor. The gripper is left
-   as it is. `--tool-down` keeps every planned pose pointing straight down and uses only the
-   predicted yaw (the clear-piece demos were all within 0.3 deg of vertical at the grasp). The status
-   line shows `tilt=` (measured) and `planned=` (what the policy asked for, before `--tool-down`),
-   each with `lean=(x,y)`: which way the fingertips lean, in the tool's own frame. While the gripper
-   is closed, `--hold-xy-deadband-mm` (2) makes a mostly-downward plan that moves sideways less than
-   that go straight down (the demos' last 3 cm of placing were straight down; real corrections there
-   were 2-7 mm); `side=` on the status line is each plan's sideways move, `(dropped)` when removed.
+   as it is. The status line shows `tilt=` (measured) and `planned=` (the most tilted pose the
+   policy asks for), each with `lean=(x,y)`: which way the fingertips lean, in the tool's own frame,
+   and `side=`, each plan's largest sideways move (about 0 while it holds still).
    `--compliance log|on` (off by default) adds a contact layer while the gripper is closed. It slides
    the target along sideways contact force (`--comp-force-gain` 1 mm/s per N past 2 N). On a rim
    landing (pressing over `--comp-min-fz` 3 N, under 2 N sideways, no progress for `--search-stall-s`
@@ -271,7 +267,7 @@ The policy plans from the driver's `/tcp_pose_broadcaster/pose` (`--anchor drive
 the demos' actions are `inv(driver pose) @ teleop command`, and the driver's (calibrated) and
 `core.fk`'s (nominal) kinematics are ~1.2 mm and 0.3 deg apart, so a still arm reads as that small
 action. Planned from `fk(q)` (`--anchor fk`) it moved the arm that much every plan: a steady creep
-back and a building tilt, which `--tool-down` and the xy deadband only hid.
+back and a building tilt (`side=` ~1.2 mm and `planned=` 0.3 deg on every plan).
 
 How it runs the policy: every 0.1 s (the training rate) the newest wrist frame goes into its
 history; every 8 frames it plans 16 tool0 targets relative to the measured pose at that frame,

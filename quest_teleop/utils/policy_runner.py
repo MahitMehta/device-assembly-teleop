@@ -82,34 +82,6 @@ def tilt_of(R: np.ndarray) -> tuple[float, np.ndarray]:
     return deg, (lean / n if n > 1e-9 else np.zeros(2))
 
 
-def tool_down(chunk: "Chunk") -> "Chunk":
-    """The chunk with every pose turned to point straight down, keeping its position and yaw
-    (TeleopCore's pointing_down). For tasks whose demos were all vertical."""
-    from quest_teleop.utils.core import pointing_down
-    poses = chunk.poses.copy()
-    for T in poses:
-        T[:3, :3] = pointing_down(T[:3, :3])
-    return Chunk(t0=chunk.t0, dt=chunk.dt, poses=poses, grip=chunk.grip)
-
-
-def xy_deadband(chunk: "Chunk", anchor: np.ndarray, n_exec: int, mm: float) -> tuple["Chunk", float, bool]:
-    """Drop small sideways drift from a mostly-downward plan: if the part of the plan that runs
-    moves the tool down more than twice as far as sideways, and sideways by less than `mm`, every
-    pose keeps the anchor's x, y (base frame) and the descent goes straight down.
-
-    In the clear-piece demos the last 3 cm of the placing descent went straight down (median
-    0.1 mm sideways); deliberate corrections there were 2-7 mm. Returns (chunk, the plan's
-    largest sideways move in mm, whether it was dropped)."""
-    p = chunk.poses[:n_exec, :3, 3]
-    side = float(np.max(np.linalg.norm(p[:, :2] - anchor[:2, 3], axis=1))) * 1000
-    down = float(anchor[2, 3] - p[-1, 2]) * 1000
-    if mm <= 0 or side >= mm or down <= 2 * side:
-        return chunk, side, False
-    poses = chunk.poses.copy()
-    poses[:, :2, 3] = anchor[:2, 3]
-    return Chunk(t0=chunk.t0, dt=chunk.dt, poses=poses, grip=chunk.grip), side, True
-
-
 class ContactCompliance:
     """Admittance for placing a held piece, as an offset on the policy's position targets (125 Hz,
     on top of the stiff position servo, like the PBIC layer of arXiv 2603.15152 but for flat landings).
