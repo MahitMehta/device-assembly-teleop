@@ -5,7 +5,8 @@ UR5e, through the same driver, controller, safety holds and motion limits as tel
 Dry-run is the default: it plans and logs and publishes /policy/target_pose, but sends nothing to
 the arm or gripper. This node never switches controllers.
 
-Enter starts a run, Enter again pauses it (the arm holds where it is), Ctrl-C quits. Each run
+Enter starts a run, Enter again pauses it (the arm holds where it is), B (while paused, live only)
+moves the arm back to the demos' start pose (--home-joints), Ctrl-C quits. Each run
 starts the policy fresh (no frames from before the pause). A run pauses by itself after
 --max-run-s, on any hold, and when the task looks done (--auto-stop-s: the gripper has closed and
 reopened, and the policy has planned almost no motion since).
@@ -24,6 +25,8 @@ import argparse
 import math
 import select
 import sys
+import termios
+import tty
 import threading
 import time
 
@@ -50,6 +53,9 @@ IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
 # Jaw gap guesses for a gripper_width policy input when the gripper reports nothing (--no-gripper):
 # in the demos the jaws read 17 mm closed on the clear piece and 84 mm open.
 GUESS_CLOSED_M, GUESS_OPEN_M = 0.017, 0.084
+# Median joints (rad) at the start of the 45 clear-piece demos (/data/teleop_demos/clear-piece): tool
+# straight down, TCP ~35 cm above the base. Per joint the demos spread 4-7 deg (wrist 3: 16 deg).
+DEMO_START_Q = (3.496, -1.307, -2.135, -1.305, 1.571, 0.247)
 
 
 class PolicyNode(Node):
@@ -79,6 +85,8 @@ class PolicyNode(Node):
         self.plans = 0
         self.plan_ms = []
         self.opening = self.min_opening = None   # policy's predicted jaw opening (m): now, and lowest this run
+        self.homing = False           # moving back to --home-joints (B), between runs
+        self.home_q = np.array(args.home_joints, dtype=float)
         self._resync = False
         self._recenter = False
         self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
@@ -152,8 +160,59 @@ class PolicyNode(Node):
             self._recenter = True      # the workspace box follows each run's start pose
             self.run_start = time.monotonic()
             self.opening = self.min_opening = None
+            self.homing = False
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
+
+    def home(self) -> None:
+        """B: between runs, move the arm back to --home-joints (the demos' start pose). B again stops."""
+        log = self.get_logger()
+        if self.homing:
+            self.homing = False
+            log.info("Return to start stopped (B); the arm holds here.")
+        elif self.running:
+            log.warning("Pause the run (Enter) before returning to the start pose.")
+        elif not self.args.live:
+            log.warning("Return to start needs --live (a dry run sends nothing to the arm).")
+        elif self.core is None:
+            log.warning("No joint states yet.")
+        else:
+            with self.lock:
+                q = None if self.q_actual is None else self.q_actual.copy()
+            reason = None if q is None else self._gate(q)
+            if q is None or reason:
+                log.warning(f"Not moving: {reason or 'no joint states'}.")
+                return
+            self.fault = None
+            far = np.max(np.abs(self.home_q - q))
+            if far > self.args.home_max_move:
+                log.error(f"Not moving: a joint would turn {np.degrees(far):.0f} deg to reach the start pose "
+                          f"(--home-max-move {np.degrees(self.args.home_max_move):.0f} deg). Jog it closer first.")
+                return
+            self._resync = True        # start from where the arm actually is
+            self.homing = True
+            log.info(f"Returning to the start pose at {self.args.home_speed:.2f} rad/s (B stops, Enter starts a run).")
+
+    def _home_step(self, dt: float) -> np.ndarray:
+        """One control tick toward --home-joints: all joints arrive together, the fastest at
+        --home-speed, never lower than the floor allows (same check as TeleopCore)."""
+        c, log = self.core, self.get_logger()
+        d = self.home_q - c.q_cmd
+        n = float(np.max(np.abs(d)))
+        if n < 1e-4:
+            self.homing = False
+            log.info("At the start pose. Press Enter to start a run.")
+            return c.q_cmd
+        next_q = c.q_cmd + d * min(1.0, self.args.home_speed * dt / n)
+        if c.lim.min_z is not None:
+            floor = min(c.lim.min_z, c._body_low(c.q_cmd))
+            if c._body_low(next_q) < floor - 0.003:
+                self.homing = False
+                log.error("Return to start stopped: the path would take the arm or gripper below the floor. Jog it up first.")
+                return c.q_cmd
+        c.q_cmd = next_q
+        c.target = fk(next_q, c.map.tcp_offset)
+        return next_q
 
     def _recent_frames(self, n: int = 5, timeout: float = 1.5) -> list[np.ndarray]:
         """The next n distinct camera frames, at the size the policy sees."""
@@ -330,6 +389,9 @@ class PolicyNode(Node):
                     self.get_logger().error(f"HOLD: {reason}.{self._readout()}")
                 self.fault = reason
                 self._pause(reason)
+                if self.homing:
+                    self.homing = False
+                    self.get_logger().error("Return to start stopped by the hold.")
                 self.force_baseline = None
                 self._status(f"hold: {reason}")
                 return
@@ -357,6 +419,9 @@ class PolicyNode(Node):
                 status += f" ({self.core.limit_detail})"
         elif self.running:
             status = "waiting for the first plan"
+        elif self.homing:
+            q_cmd = self._home_step(1.0 / self.args.rate)
+            status = "returning to start" if self.homing else "paused"
         else:
             self.force_baseline = None
             status = "paused"
@@ -417,12 +482,19 @@ class PolicyNode(Node):
 
 
 def keyboard(node: PolicyNode, stop: threading.Event) -> None:
-    """Enter toggles the run. Polls stdin so Ctrl-C still reaches the main thread."""
+    """Enter toggles the run; B returns to the start pose. Single keys on a terminal (main() puts it in
+    cbreak mode), else whole lines ("b" + Enter). Polls stdin so Ctrl-C still reaches the main thread."""
+    tty_in = sys.stdin.isatty()
     while not stop.is_set():
         r, _, _ = select.select([sys.stdin], [], [], 0.2)
-        if r:
-            if not sys.stdin.readline():   # end of input: no terminal
-                return
+        if not r:
+            continue
+        key = sys.stdin.read(1) if tty_in else sys.stdin.readline()
+        if not key:   # end of input
+            return
+        if key.strip().lower() == "b":
+            node.home()
+        elif key in ("\n", "\r") or not tty_in:
             node.toggle()
 
 
@@ -449,6 +521,11 @@ def parse_args(argv=None):
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N")
     p.add_argument("--box-half-extent", type=float, default=0.35, help="m the tool may move from where the run started, per axis (the demos went up to 30 cm)")
     p.add_argument("--min-z", type=float, default=0.01)
+    p.add_argument("--home-joints", type=float, nargs=6, default=list(DEMO_START_Q), metavar="Q",
+                   help="Joints (rad) that B returns to between runs; default: median start of the clear-piece demos")
+    p.add_argument("--home-speed", type=float, default=0.3, help="rad/s of the fastest joint when returning to start")
+    p.add_argument("--home-max-move", type=float, default=1.5,
+                   help="rad; B refuses if any joint would turn more than this (e.g. the pan wrapped the other way)")
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
@@ -501,6 +578,9 @@ def main(argv=None) -> int:
     node.timer.reset()
     node.start_thinking()
     stop = threading.Event()
+    term = termios.tcgetattr(sys.stdin) if sys.stdin.isatty() else None
+    if term is not None:
+        tty.setcbreak(sys.stdin)   # single keys, no Enter needed for B; Ctrl-C still works
     threading.Thread(target=keyboard, args=(node, stop), daemon=True).start()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
@@ -513,6 +593,8 @@ def main(argv=None) -> int:
             raise
     finally:
         stop.set()
+        if term is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, term)
         node.stop_thinking()
         runner.close()
         if node.gripper is not None:

@@ -233,7 +233,12 @@ may run at a time.
    docker compose run --rm policy /policies/real_v1
    ```
    It loads the policy and runs one warm-up plan, then waits. **Enter** starts a run, Enter again
-   pauses it (the arm holds), Ctrl-C quits. Each run starts the policy fresh.
+   pauses it (the arm holds), Ctrl-C quits. Each run starts the policy fresh. Between runs (live
+   only), **B** moves the arm back to where the demos started (`--home-joints`, by default the
+   median start of the 45 clear-piece demos) at `--home-speed` (0.3 rad/s), all joints arriving
+   together; B again stops it. It refuses if a joint would turn more than `--home-max-move`
+   (1.5 rad), and stops on any hold or if the path would go below the floor. The gripper is left
+   as it is.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live
