@@ -47,7 +47,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -88,6 +88,7 @@ class PolicyNode(Node):
         self.opening = self.min_opening = None   # policy's predicted jaw opening (m): now, and lowest this run
         self.homing = False           # moving back to --home-joints (B), between runs
         self.plan_tilt = None         # (deg, lean) the latest plan asked for, before --tool-down
+        self.plan_side = None         # (mm, dropped) the latest plan's sideways move, and if --hold-xy-deadband-mm dropped it
         self.home_q = np.array(args.home_joints, dtype=float)
         self._resync = False
         self._recenter = False
@@ -164,6 +165,7 @@ class PolicyNode(Node):
             self.opening = self.min_opening = None
             self.homing = False
             self.plan_tilt = None
+            self.plan_side = None
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
 
@@ -335,6 +337,11 @@ class PolicyNode(Node):
                 self.plan_tilt = max((tilt_of(T[:3, :3]) for T in chunk.poses[:self.runner.n_exec]), key=lambda t: t[0])
                 if self.args.tool_down:
                     chunk = tool_down(chunk)
+                if self.grip.closed:      # holding the piece: no creeping sideways on the way down
+                    chunk, side, dropped = xy_deadband(chunk, tool0, self.runner.n_exec, self.args.hold_xy_deadband_mm)
+                    self.plan_side = (side, dropped)
+                else:
+                    self.plan_side = None
                 with self.lock:
                     self.chunk = chunk
                     self.plans += 1
@@ -460,6 +467,8 @@ class PolicyNode(Node):
                     extra += (f" tilt={deg:.1f}deg lean=({lean[0]:+.2f},{lean[1]:+.2f})"
                               f" planned={pdeg:.1f}deg lean=({plean[0]:+.2f},{plean[1]:+.2f})"
                               + (" [tool-down]" if self.args.tool_down else ""))
+                if self.plan_side is not None:
+                    extra += f" side={self.plan_side[0]:.1f}mm{' (dropped)' if self.plan_side[1] else ''}"
                 if self.opening is not None:
                     extra += (f" opening={self.opening * 1000:.0f}mm (min {self.min_opening * 1000:.0f},"
                               f" closes <{self.args.grip_close_below * 1000:.0f})")
@@ -539,6 +548,9 @@ def parse_args(argv=None):
     p.add_argument("--tool-down", action="store_true",
                    help="Keep every planned pose pointing straight down (only the predicted yaw is used), as in the "
                         "clear-piece demos (all within 0.3 deg of vertical at the grasp)")
+    p.add_argument("--hold-xy-deadband-mm", type=float, default=2.0,
+                   help="While holding the piece, a mostly-downward plan that moves sideways less than this (mm) goes "
+                        "straight down instead (demos: last 3 cm of the placing descent median 0.1 mm sideways); 0 disables")
     p.add_argument("--home-joints", type=float, nargs=6, default=list(DEMO_START_Q), metavar="Q",
                    help="Joints (rad) that B returns to between runs; default: median start of the clear-piece demos")
     p.add_argument("--home-speed", type=float, default=0.3, help="rad/s of the fastest joint when returning to start")

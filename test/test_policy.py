@@ -146,3 +146,30 @@ def test_tilt_of_reports_lean_in_tool_frame():
     R = down @ matrix_from_rotvec(np.array([0.0, 0.1, 0.0]))
     deg, lean = tilt_of(R)
     assert abs(deg - np.degrees(0.1)) < 1e-6 and abs(abs(lean[0]) - 1) < 1e-6
+
+
+def _descent_chunk(side_mm, down_mm, n=16):
+    anchor = np.eye(4); anchor[:3, 3] = [0.4, 0.1, 0.3]
+    poses = np.repeat(anchor[None], n, axis=0).copy()
+    f = np.linspace(0, 1, n)[:, None]
+    poses[:, :3, 3] = anchor[:3, 3] + f * np.array([-side_mm, 0.0, -down_mm]) / 1000
+    return anchor, Chunk(t0=0.0, dt=0.1, poses=poses, grip=np.zeros(n))
+
+
+def test_xy_deadband_drops_small_drift_on_the_way_down():
+    from quest_teleop.utils.policy_runner import xy_deadband
+    anchor, c = _descent_chunk(side_mm=1.0, down_mm=10.0, n=16)
+    out, side, dropped = xy_deadband(c, anchor, 8, 2.0)
+    assert dropped and 0 < side < 1.0
+    assert np.allclose(out.poses[:, :2, 3], anchor[:2, 3])
+    assert np.allclose(out.poses[:, 2, 3], c.poses[:, 2, 3])   # descent kept
+
+
+def test_xy_deadband_keeps_real_corrections_and_non_descents():
+    from quest_teleop.utils.policy_runner import xy_deadband
+    anchor, c = _descent_chunk(side_mm=8.0, down_mm=10.0)        # deliberate correction
+    assert not xy_deadband(c, anchor, 8, 2.0)[2]
+    anchor, c = _descent_chunk(side_mm=1.0, down_mm=1.0)         # not mostly downward
+    assert not xy_deadband(c, anchor, 8, 2.0)[2]
+    anchor, c = _descent_chunk(side_mm=1.0, down_mm=10.0)
+    assert not xy_deadband(c, anchor, 8, 0.0)[2]                 # disabled

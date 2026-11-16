@@ -241,7 +241,10 @@ may run at a time.
    as it is. `--tool-down` keeps every planned pose pointing straight down and uses only the
    predicted yaw (the clear-piece demos were all within 0.3 deg of vertical at the grasp). The status
    line shows `tilt=` (measured) and `planned=` (what the policy asked for, before `--tool-down`),
-   each with `lean=(x,y)`: which way the fingertips lean, in the tool's own frame.
+   each with `lean=(x,y)`: which way the fingertips lean, in the tool's own frame. While the gripper
+   is closed, `--hold-xy-deadband-mm` (2) makes a mostly-downward plan that moves sideways less than
+   that go straight down (the demos' last 3 cm of placing were straight down; real corrections there
+   were 2-7 mm); `side=` on the status line is each plan's sideways move, `(dropped)` when removed.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live
