@@ -298,6 +298,7 @@ class PolicyNode(Node):
         with self.lock:
             self.chunk = None
         self._resync = True            # done by the control loop, which owns self.core
+        self.comp.reset()              # --compliance log while paused: zero from the next reading
 
     # ---- the policy, at 10 Hz on its own thread
     def _policy_loop(self) -> None:
@@ -449,6 +450,10 @@ class PolicyNode(Node):
         else:
             self.force_baseline = None
             status = "paused"
+            if self.args.compliance == "log" and self.force is not None and self.torque is not None:
+                # Press test: what the layer would do, with the arm still. Re-zeroed at each pause.
+                self.comp.filter(np.r_[self.force, self.torque], 1.0 / self.args.rate)
+                self.comp.step(fk(q_actual)[:3, :3], 1.0 / self.args.rate)
         if self.cmd_pub is not None:
             self.cmd_pub.publish(Float64MultiArray(data=[float(v) for v in q_cmd]))
         self._status(status)
@@ -502,12 +507,7 @@ class PolicyNode(Node):
                               f" planned={pdeg:.1f}deg lean=({plean[0]:+.2f},{plean[1]:+.2f})"
                               + (" [tool-down]" if self.args.tool_down else ""))
                 if self.args.compliance != "off" and self.grip.closed:
-                    c = self.comp
-                    extra += f" comp[{self.args.compliance}]=({c.offset[0] * 1000:+.1f},{c.offset[1] * 1000:+.1f})mm fz={c.w[2]:+.1f}N"
-                    if c.contact is not None:
-                        extra += f" contact=({c.contact[0] * 1000:+.0f},{c.contact[1] * 1000:+.0f})mm"
-                    if c.pushing:
-                        extra += " PUSH-HOLD"
+                    extra += self._comp_text()
                 if self.plan_side is not None:
                     extra += f" side={self.plan_side[0]:.1f}mm{' (dropped)' if self.plan_side[1] else ''}"
                 if self.opening is not None:
@@ -515,7 +515,30 @@ class PolicyNode(Node):
                               f" closes <{self.args.grip_close_below * 1000:.0f})")
                 if self.wrench_in is not None:
                     extra += f" ft_in={np.linalg.norm(self.wrench_in[:3]):.1f}N"
+            if not self.running and self.args.compliance == "log":
+                extra += self._comp_text()
             self.get_logger().info(f"[{mode}] {status}{extra} |{self._readout()}")
+
+    def _comp_text(self) -> str:
+        """The compliance layer in robot terms: fwd = the robot's forward (Mapping.robot_forward_yaw),
+        left, up. push = filtered, zeroed force on the tool; slide = where it is moving the target."""
+        c = self.comp
+        with self.lock:
+            q = self.q_actual
+        R = fk(q)[:3, :3]
+        yaw = self.mapping.robot_forward_yaw
+        fwd, left = np.array([np.cos(yaw), np.sin(yaw)]), np.array([-np.sin(yaw), np.cos(yaw)])
+        Fb = R @ c.w[:3]
+        out = (f" comp[{self.args.compliance}] push fwd={Fb[:2] @ fwd:+.1f} left={Fb[:2] @ left:+.1f} up={Fb[2]:+.1f}N"
+               f" (tool F=({c.w[0]:+.1f},{c.w[1]:+.1f},{c.w[2]:+.1f})N tau=({c.w[3]:+.2f},{c.w[4]:+.2f},{c.w[5]:+.2f})Nm)")
+        if c.contact is not None:
+            rb = R[:2, :2] @ c.contact
+            out += f" contact fwd={rb @ fwd * 1000:+.0f} left={rb @ left * 1000:+.0f}mm"
+        out += (f" slide fwd={c.v_base @ fwd * 1000:+.1f} left={c.v_base @ left * 1000:+.1f}mm/s"
+                f" offset fwd={c.offset @ fwd * 1000:+.1f} left={c.offset @ left * 1000:+.1f}mm")
+        if c.pushing:
+            out += " PUSH-HOLD"
+        return out
 
     def _publish_target(self, T: np.ndarray) -> None:
         msg = PoseStamped()

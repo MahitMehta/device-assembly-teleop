@@ -141,6 +141,7 @@ class ContactCompliance:
         self.offset = np.zeros(2)
         self.contact = None     # r (m, tool x, y) while touching
         self.pushing = False
+        self.v_base = np.zeros(2)   # the slide this tick (m/s, base x, y)
 
     def filter(self, wrench: np.ndarray, dt: float) -> None:
         wrench = np.asarray(wrench, float)
@@ -166,7 +167,8 @@ class ContactCompliance:
         side = np.linalg.norm(F[:2])
         if self.force_gain and side > self.force_deadband:
             v += self.force_gain * (side - self.force_deadband) * F[:2] / side
-        self.offset += (R[:2, :2] @ v) * dt
+        self.v_base = R[:2, :2] @ v
+        self.offset += self.v_base * dt
         n = np.linalg.norm(self.offset)
         if n > self.max_offset:
             self.offset *= self.max_offset / n
