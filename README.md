@@ -246,17 +246,22 @@ may run at a time.
    that go straight down (the demos' last 3 cm of placing were straight down; real corrections there
    were 2-7 mm); `side=` on the status line is each plan's sideways move, `(dropped)` when removed.
    `--compliance log|on` (off by default) adds a contact layer while the gripper is closed. It slides
-   the target along sideways contact force (`--comp-force-gain` 1 mm/s per N past 2 N) and away from
-   the edge the wrist torque points to (`--comp-speed-mm-s` 2, direction only, beyond
-   `--comp-min-r-mm` 8, only while sideways force is under `--comp-edge-max-side` 0.3 of the push),
-   up to `--comp-max-mm` 3 in total per held piece, staying vertical; the log shows which term slides
-   (`slide[force|edge]`) and the total (`slid`). While touching (|F_z| >
-   `--comp-min-fz` 3 N) it descends no faster than `--comp-descent-mm-s` 2; past `--comp-push-limit`
-   12 N it rises `--comp-backoff-mm` 0.5 and holds (`PUSH-BACKOFF`). A gripper open shorter than
-   `--comp-keep-s` 1 keeps the offset. Signs and defaults come from a press test on the arm
-   (2026-11-16): pushes on the held piece gave way the right way, and edge presses read the right
-   edge at ~3x its distance. `log` only prints it, and also reports while paused (re-zeroed at each
-   pause) in robot terms (`push fwd/left/up`, `contact`, `slide`, `offset`), for repeating that test.
+   the target along sideways contact force (`--comp-force-gain` 1 mm/s per N past 2 N). On a rim
+   landing (pressing over `--comp-min-fz` 3 N, under 2 N sideways, no progress for `--search-stall-s`
+   0.5) it spirals to find the hole (`--search`, on by default): radius growing `--search-pitch-mm` 1
+   per turn at `--search-speed-mm-s` 5 up to `--search-max-mm` 4 (about 10 s), holding the push near
+   `--search-force` 6 N, until the piece drops `--search-drop-mm` 1 below where it stalled
+   (`search-found`) or the spiral ends (`search-failed`). Sliding and search together stay within
+   `--comp-max-mm` 6, staying vertical. While touching it descends no faster than
+   `--comp-descent-mm-s` 2; past `--comp-push-limit` 12 N it rises `--comp-backoff-mm` 0.5 and holds
+   (`PUSH-BACKOFF`). A gripper open shorter than `--comp-keep-s` 1 keeps the offset; a run started
+   with the gripper closed keeps the earlier force zero. `--comp-edge toward|away` (off by default)
+   adds a slide at `--comp-speed-mm-s` 2 toward (or away from) the edge the wrist torque says is
+   touching, only while the push is nearly vertical (sideways under `--comp-edge-max-side` 0.3 of it):
+   with real sideways force it read the wrong edge in every placement; in the rim landings it read
+   front-left, where the piece needed to go. Signs come from a
+   press test on the arm (2026-11-16). `log` only prints it, and also reports while paused in robot
+   terms (`push fwd/left/up`, `slide`, `slid`), for repeating that test.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live

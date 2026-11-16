@@ -188,7 +188,7 @@ def _settle(c, w, R=np.eye(3), ticks=125, dt=0.008):
 
 def test_compliance_slides_away_from_an_off_axis_contact():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0)
     c.filter(np.zeros(6), 0.008)                    # zero: free air
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.5, 0.0, -10.0]))   # rim contact at +x, a little friction
     assert c.contact is not None and abs(c.contact[0] - 0.004) < 3e-4 and abs(c.contact[1]) < 3e-4
@@ -197,21 +197,21 @@ def test_compliance_slides_away_from_an_off_axis_contact():
 
 def test_compliance_ignores_the_sensor_sign_and_centred_or_light_contact():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0)
     c.filter(np.zeros(6), 0.008)
     _settle(c, -_wrench_at([0.0, -0.004, 0.19], [0.0, 0.0, -10.0]))   # flipped convention, contact at -y
     assert c.offset[1] > 0.001
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.0005, 0.0, 0.19], [0.0, 0.0, -10.0]))   # centred: inside min_r
     assert np.allclose(c.offset, 0)
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -1.0]))    # too light to count
     assert np.allclose(c.offset, 0) and c.contact is None
 
 
 def test_compliance_caps_offset_rebases_and_flags_pushing():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0, force_gain=0.0, max_offset=0.003, push_limit=20.0)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0, force_gain=0.0, max_offset=0.003, push_limit=20.0)
     c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -25.0]), ticks=1000)
     assert abs(np.linalg.norm(c.offset) - 0.003) < 1e-9 and c.pushing
@@ -226,14 +226,14 @@ def test_compliance_turns_tool_frame_motion_into_base():
     from quest_teleop.utils.core import matrix_from_rotvec
     from quest_teleop.utils.policy_runner import ContactCompliance
     R = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))          # tool down: tool y = base -y
-    c = ContactCompliance(contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(speed=0.002, contact_z=0.19, min_r=0.0015, edge_max_side=10.0); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.0, 0.004, 0.19], [0.0, 0.0, -10.0]), R=R)   # contact at tool +y
     assert c.offset[1] > 0.001                                   # away = tool -y = base +y
 
 
-def _press_test_compliance():
+def _press_test_compliance(**kw):
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance()        # defaults, as set from the press test
+    c = ContactCompliance(**kw)    # defaults, as set from the press test
     c.filter(np.zeros(6), 0.008)
     return c
 
@@ -241,7 +241,7 @@ def _press_test_compliance():
 def test_compliance_defaults_reproduce_the_press_test():
     # Readings from the arm (tool frame; tool -y = robot forward there). Front edge, then back edge.
     for F, tau, sign in (([0.5, -1.5, -10.0], [0.27, -0.05, 0.0], -1), ([-0.3, 2.4, -8.6], [-0.23, -0.05, 0.0], +1)):
-        c = _press_test_compliance()
+        c = _press_test_compliance(speed=0.002)   # the edge term is off by default now
         _settle(c, np.r_[F, tau])
         assert c.contact is not None and np.sign(c.contact[1]) == sign     # front: tool -y; back: tool +y
         assert np.sign(c.offset[1]) == -sign                               # slides away from that edge
@@ -277,3 +277,75 @@ def test_compliance_uses_force_not_edge_with_real_sideways_contact():
     c = _press_test_compliance()
     _settle(c, np.r_[[-3.2, 1.5, -6.5], [-0.08, -0.61, -0.36]])
     assert c.path == "force" and c.offset[0] < 0
+
+
+def test_compliance_keeps_its_zero_when_a_run_starts_holding():
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    c = ContactCompliance()
+    c.filter(np.zeros(6), 0.008)                     # zero in free air
+    c.reset(keep_zero=True)
+    _settle(c, np.r_[[0.0, 0.0, -10.0], [0.0, 0.0, 0.0]])   # run starts while pressing 10 N
+    assert abs(c.w[2] + 10.0) < 0.1                   # still reads the press
+    c.reset(keep_zero=False)
+    _settle(c, np.r_[[0.0, 0.0, -10.0], [0.0, 0.0, 0.0]])
+    assert abs(c.w[2]) < 1e-9                         # re-zeroed
+
+
+def test_spiral_search_starts_on_a_stall_spirals_and_finds_the_hole():
+    from quest_teleop.utils.policy_runner import SpiralSearch
+    s, dt, t, z = SpiralSearch(pitch=0.001, speed=0.005, max_r=0.004), 0.008, 0.0, 0.050
+    pos = np.zeros(2)
+    for _ in range(int(0.6 / dt)):                    # pressing 10 N, 1 N sideways, not moving down
+        pos += s.update(t, dt, -10.0, 1.0, z) * dt; t += dt
+        if s.state != "idle":
+            break
+    assert s.state == "searching" and 0.45 < t < 0.55 and np.allclose(pos, 0)
+    radii = []
+    for _ in range(int(3.0 / dt)):
+        pos += s.update(t, dt, -6.0, 1.0, z) * dt; t += dt
+        radii.append(np.linalg.norm(pos))
+    assert s.state == "searching" and abs(np.linalg.norm(pos) - s.r) < 1e-6
+    assert 0.001 < s.r < 0.004 and radii[-1] > radii[len(radii) // 2]   # growing outward
+    s.update(t, dt, -2.0, 0.5, z - 0.0015)            # the piece drops in
+    assert s.state == "found" and np.allclose(s.update(t, dt, -2.0, 0.5, z - 0.002), 0)
+
+
+def test_spiral_search_ignores_sideways_cues_and_progress_and_gives_up():
+    from quest_teleop.utils.policy_runner import SpiralSearch
+    dt = 0.008
+    s = SpiralSearch()
+    for i in range(200):                              # sideways force present: that is the slide's job
+        s.update(i * dt, dt, -10.0, 4.0, 0.05)
+    assert s.state == "idle"
+    s = SpiralSearch()
+    for i in range(200):                              # still going down 2 mm/s: not stalled
+        s.update(i * dt, dt, -10.0, 1.0, 0.05 - 0.002 * i * dt)
+    assert s.state == "idle"
+    s, t = SpiralSearch(max_r=0.002), 0.0
+    for _ in range(int(20 / dt)):
+        s.update(t, dt, -6.0, 1.0, 0.05); t += dt
+    assert s.state == "failed"
+
+
+def test_spiral_search_holds_the_push_near_its_force():
+    from quest_teleop.utils.policy_runner import SpiralSearch
+    s = SpiralSearch(force=6.0, z_speed=0.001)
+    assert s.z_target(0.05, -10.0, 0.01) > 0.05      # too hard: rise
+    assert s.z_target(0.05, -1.0, 0.01) < 0.05       # too light: sink
+    assert s.z_target(0.05, -4.0, 0.01) == 0.05
+
+
+def test_edge_term_is_off_by_default():
+    c = _press_test_compliance()
+    _settle(c, np.r_[[0.5, -1.5, -10.0], [0.27, -0.05, 0.0]])   # front-edge press
+    assert c.contact is not None and np.allclose(c.offset, 0)
+
+
+def test_edge_toward_mode_moves_toward_the_touching_edge():
+    # Front-edge press from the press test (tool -y = forward there): toward = forward.
+    c = _press_test_compliance(speed=0.002, edge_dir=1.0)
+    _settle(c, np.r_[[0.5, -1.5, -10.0], [0.27, -0.05, 0.0]])
+    assert c.path == "edge" and c.offset[1] < -0.001
+    c = _press_test_compliance(speed=0.002, edge_dir=1.0)     # gated off with real sideways force
+    _settle(c, np.r_[[-5.0, -0.6, -2.5], [0.08, -0.87, -0.48]])
+    assert c.path == "force"

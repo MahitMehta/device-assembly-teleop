@@ -47,7 +47,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband, ContactCompliance, contact_descent
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband, ContactCompliance, SpiralSearch, contact_descent
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -89,12 +89,17 @@ class PolicyNode(Node):
         self.homing = False           # moving back to --home-joints (B), between runs
         self.plan_tilt = None         # (deg, lean) the latest plan asked for, before --tool-down
         self.plan_side = None         # (mm, dropped) the latest plan's sideways move, and if --hold-xy-deadband-mm dropped it
-        self.comp = ContactCompliance(speed=args.comp_speed_mm_s / 1000, contact_z=args.comp_contact_z,
+        self.comp = ContactCompliance(speed=0.0 if args.comp_edge == "off" else args.comp_speed_mm_s / 1000,
+                                      edge_dir=1.0 if args.comp_edge == "toward" else -1.0, contact_z=args.comp_contact_z,
                                       min_fz=args.comp_min_fz, min_r=args.comp_min_r_mm / 1000,
                                       max_offset=args.comp_max_mm / 1000, force_gain=args.comp_force_gain / 1000,
                                       force_deadband=args.comp_force_deadband, push_limit=args.comp_push_limit,
                                       edge_max_side=args.comp_edge_max_side)
         self._comp_chunk = None       # the chunk the offset was last rebased to
+        self.search = SpiralSearch(pitch=args.search_pitch_mm / 1000, speed=args.search_speed_mm_s / 1000,
+                                   max_r=args.search_max_mm / 1000, force=args.search_force,
+                                   stall_s=args.search_stall_s, drop=args.search_drop_mm / 1000,
+                                   min_fz=args.comp_min_fz, side_max=args.comp_force_deadband)
         self._open_since = None       # when the gripper last opened (the offset survives a brief flicker)
         self._push_z = None           # target height when pushing past --comp-push-limit began
         self._comp_state = ""
@@ -175,7 +180,10 @@ class PolicyNode(Node):
             self.homing = False
             self.plan_tilt = None
             self.plan_side = None
-            self.comp.reset()         # zeroed from the first reading of the run (arm still, touching nothing)
+            # Zeroed from the first reading of the run (arm still, touching nothing), unless holding the
+            # piece, which may be pressing on the part: then keep the earlier zero.
+            self.comp.reset(keep_zero=bool(self.grip.closed))
+            self.search.reset()
             self._comp_chunk = None
             self._open_since = self._push_z = None
             self._comp_state = ""
@@ -304,7 +312,8 @@ class PolicyNode(Node):
         with self.lock:
             self.chunk = None
         self._resync = True            # done by the control loop, which owns self.core
-        self.comp.reset()              # --compliance log while paused: zero from the next reading
+        self.comp.reset(keep_zero=bool(self.grip.closed))   # log while paused: re-zero unless holding
+        self.search.reset()
 
     # ---- the policy, at 10 Hz on its own thread
     def _policy_loop(self) -> None:
@@ -484,17 +493,30 @@ class PolicyNode(Node):
         keep = self.grip.closed or (self._open_since is not None and now - self._open_since < self.args.comp_keep_s)
         if not keep:
             self.comp.release()
+            self.search.reset()
             self._push_z, self._comp_state = None, ""
             return desired
+        measured = fk(q_actual)
         if self.grip.closed:
-            self.comp.step(fk(q_actual)[:3, :3], dt)
+            extra = None
+            if self.args.search:
+                w = self.comp.w
+                extra = self.search.update(now, dt, w[2], float(np.linalg.norm(w[:2])), measured[2, 3])
+            self.comp.step(measured[:3, :3], dt, extra)
         if mode != "on":
             return desired
         out = desired.copy()
         out[:2, 3] += self.comp.offset
-        out[2, 3], self._push_z, self._comp_state = contact_descent(
-            out[2, 3], self.core.target[2, 3], self.comp.w[2], self.comp.min_fz, self.comp.pushing, self._push_z, dt,
-            descent=self.args.comp_descent_mm_s / 1000, backoff=self.args.comp_backoff_mm / 1000)
+        if self.search.state == "searching":
+            self._push_z = None
+            out[2, 3] = max(out[2, 3], self.search.z_target(self.core.target[2, 3], self.comp.w[2], dt))
+            self._comp_state = f"SEARCH r={self.search.r * 1000:.1f}mm"
+        else:
+            out[2, 3], self._push_z, self._comp_state = contact_descent(
+                out[2, 3], self.core.target[2, 3], self.comp.w[2], self.comp.min_fz, self.comp.pushing, self._push_z, dt,
+                descent=self.args.comp_descent_mm_s / 1000, backoff=self.args.comp_backoff_mm / 1000)
+            if self.search.state in ("found", "failed"):
+                self._comp_state = (self._comp_state + f" search-{self.search.state}").strip()
         return out
 
     # ---- outputs
@@ -635,16 +657,30 @@ def parse_args(argv=None):
     p.add_argument("--compliance", choices=("off", "log", "on"), default="off",
                    help="While holding the piece: slide away from where the wrist torque says it touches, and stop "
                         "descending past --comp-push-limit. 'log' only computes and logs it")
-    p.add_argument("--comp-speed-mm-s", type=float, default=2.0, help="mm/s it slides away from the contact")
+    p.add_argument("--comp-edge", choices=("off", "toward", "away"), default="off",
+                   help="On a near-vertical push, slide toward (or away from) the edge the wrist torque says is "
+                        "touching. 'toward': front edge touching -> forward. Off by default: unreliable whenever "
+                        "there is real sideways force (it is gated off then by --comp-edge-max-side)")
+    p.add_argument("--comp-speed-mm-s", type=float, default=2.0, help="mm/s of that edge slide")
     p.add_argument("--comp-contact-z", type=float, default=0.0,
                    help="m from the flange to where sideways contact force acts, for the contact estimate; 0 (default) "
                         "ignores the sideways part, which the press test showed is mostly sensor error")
     p.add_argument("--comp-min-fz", type=float, default=3.0, help="N along tool z before it counts as touching")
     p.add_argument("--comp-min-r-mm", type=float, default=8.0,
                    help="contact estimate this close to the tool axis (mm) counts as centred (it reads ~3x the real offset)")
-    p.add_argument("--comp-max-mm", type=float, default=3.0, help="largest total sideways correction per held piece (mm)")
+    p.add_argument("--comp-max-mm", type=float, default=6.0,
+                   help="largest total sideways correction per held piece, sliding and search together (mm)")
+    p.add_argument("--search", action=argparse.BooleanOptionalAction, default=True,
+                   help="With --compliance: spiral to find the hole when the piece sits on the rim (pressing, "
+                        "no sideways force, no progress)")
+    p.add_argument("--search-pitch-mm", type=float, default=1.0, help="spiral radius growth per turn (mm)")
+    p.add_argument("--search-speed-mm-s", type=float, default=5.0, help="speed along the spiral (mm/s)")
+    p.add_argument("--search-max-mm", type=float, default=4.0, help="largest spiral radius (mm)")
+    p.add_argument("--search-force", type=float, default=6.0, help="push held while searching (N)")
+    p.add_argument("--search-stall-s", type=float, default=0.5, help="s pressing without progress before it searches")
+    p.add_argument("--search-drop-mm", type=float, default=1.0, help="drop below the stall height that counts as found (mm)")
     p.add_argument("--comp-edge-max-side", type=float, default=0.3,
-                   help="use the torque (edge) estimate only while sideways force is under this fraction of the push")
+                   help="--comp-edge acts only while sideways force is under this fraction of the push")
     p.add_argument("--comp-force-gain", type=float, default=1.0,
                    help="mm/s per N of sideways contact force beyond the dead band (0 disables)")
     p.add_argument("--comp-force-deadband", type=float, default=2.0, help="N of sideways force ignored")

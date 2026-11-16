@@ -130,18 +130,23 @@ class ContactCompliance:
       - Pushing harder than `push_limit` N along tool z: `pushing` is set, and the node stops descending.
     The offset is in base x, y, capped at `max_offset` m."""
 
-    def __init__(self, speed: float = 0.002, contact_z: float = 0.0, min_fz: float = 3.0, min_r: float = 0.008,
+    def __init__(self, speed: float = 0.0, contact_z: float = 0.0, min_fz: float = 3.0, min_r: float = 0.008,
                  max_offset: float = 0.003, force_gain: float = 0.001, force_deadband: float = 2.0,
-                 push_limit: float = 12.0, filter_s: float = 0.05, edge_max_side: float = 0.3):
+                 push_limit: float = 12.0, filter_s: float = 0.05, edge_max_side: float = 0.3,
+                 edge_dir: float = -1.0):
         self.speed, self.contact_z, self.min_fz, self.min_r = speed, contact_z, min_fz, min_r
         self.max_offset, self.force_gain, self.force_deadband = max_offset, force_gain, force_deadband
         self.push_limit, self.filter_s = push_limit, filter_s
         self.edge_max_side = edge_max_side   # torque (edge) path only while sideways force < this x |F_z|
+        self.edge_dir = edge_dir             # -1: slide away from the touching edge, +1: toward it
         self.reset()
 
-    def reset(self) -> None:
-        """Start of a run, arm still and touching nothing: the next reading is the zero."""
-        self.zero = None
+    def reset(self, keep_zero: bool = False) -> None:
+        """Start of a run, arm still and touching nothing: the next reading is the zero. keep_zero
+        (gripper closed, maybe pressing on the part): keep the zero taken before, so a run started
+        mid-press doesn't count the press as nothing (it let one run push ~24 N)."""
+        if not (keep_zero and getattr(self, "zero", None) is not None):
+            self.zero = None
         self.w = np.zeros(6)
         self.offset = np.zeros(2)
         self.contact = None     # r (m, tool x, y) while touching
@@ -164,8 +169,9 @@ class ContactCompliance:
         fz = self.w[2]
         self.pushing = abs(fz) > self.push_limit
 
-    def step(self, R: np.ndarray, dt: float) -> np.ndarray:
-        """Move the offset for one tick (tool0 orientation R in base). Returns the offset (base x, y)."""
+    def step(self, R: np.ndarray, dt: float, extra: np.ndarray | None = None) -> np.ndarray:
+        """Move the offset for one tick (tool0 orientation R in base); `extra` adds a slide (m/s, base
+        x, y), e.g. SpiralSearch's. Returns the offset (base x, y)."""
         F, T = self.w[:3], self.w[3:]
         v = np.zeros(2)
         self.contact = None
@@ -179,12 +185,14 @@ class ContactCompliance:
             self.contact = r
             n = np.linalg.norm(r)
             if n > self.min_r:
-                v -= self.speed * r / n
+                v += self.edge_dir * self.speed * r / n
                 self.path = "edge"
         if self.force_gain and side > self.force_deadband:
             v += self.force_gain * (side - self.force_deadband) * F[:2] / side
             self.path = "force"
         self.v_base = R[:2, :2] @ v
+        if extra is not None:
+            self.v_base = self.v_base + extra
         total = self.total + self.v_base * dt
         n = np.linalg.norm(total)
         if n > self.max_offset:            # the cap is on the whole correction, across plans
@@ -197,6 +205,68 @@ class ContactCompliance:
         """A new plan starts from the measured pose, which already includes the offset applied when
         its frame was taken: keep only what was added since."""
         self.offset = self.offset - at_plan
+
+
+class SpiralSearch:
+    """Feel for the hole when the held piece sits flat on the rim: pressing, no sideways force to
+    follow (it read < 2 N, and pointed the wrong way, in the rim landings), and no downward progress
+    for `stall_s`. Then it spirals outward from there (radius growing `pitch` per turn, `speed` m/s
+    along the path, up to `max_r`) while holding the push near `force` N, until the piece drops
+    `drop` m below where it stalled (found) or the spiral reaches max_r (failed). One search per held
+    piece. It gives a slide velocity for ContactCompliance.step, so replans keep what it moved."""
+
+    def __init__(self, pitch: float = 0.001, speed: float = 0.005, max_r: float = 0.004, force: float = 6.0,
+                 stall_s: float = 0.5, drop: float = 0.001, min_fz: float = 3.0, side_max: float = 2.0,
+                 z_speed: float = 0.001, progress: float = 0.0003):
+        self.pitch, self.speed, self.max_r, self.force = pitch, speed, max_r, force
+        self.stall_s, self.drop, self.min_fz, self.side_max = stall_s, drop, min_fz, side_max
+        self.z_speed, self.progress = z_speed, progress
+        self.reset()
+
+    def reset(self) -> None:
+        self.state = "idle"     # idle -> searching -> found | failed
+        self.theta = self.r = 0.0
+        self.z_stall = None
+        self._window = None     # (time, height) since the push started without progress
+
+    def update(self, t: float, dt: float, fz: float, side: float, z: float) -> np.ndarray:
+        """One tick: |F_z| fz and sideways force side (N, filtered and zeroed), measured height z.
+        Returns the slide velocity (m/s, base x, y)."""
+        fz = abs(fz)
+        if self.state == "idle":
+            if fz > self.min_fz and side < self.side_max:
+                if self._window is None or z < self._window[1] - self.progress:
+                    self._window = (t, z)               # (still) going down: restart the clock
+                elif t - self._window[0] >= self.stall_s:
+                    self.state, self.z_stall, self.theta, self.r = "searching", z, 0.0, 0.0
+            else:
+                self._window = None
+            return np.zeros(2)
+        if self.state != "searching":
+            return np.zeros(2)
+        if z < self.z_stall - self.drop:
+            self.state = "found"
+            return np.zeros(2)
+        if fz < self.min_fz and z > self.z_stall + 0.002:    # the policy lifted away: start over
+            self.reset()
+            return np.zeros(2)
+        theta = self.theta + self.speed * dt / max(self.r, 0.0005)
+        r = self.pitch * theta / (2 * np.pi)
+        if r > self.max_r:
+            self.state = "failed"
+            return np.zeros(2)
+        step = r * np.array([np.cos(theta), np.sin(theta)]) - self.r * np.array([np.cos(self.theta), np.sin(self.theta)])
+        self.theta, self.r = theta, r
+        return step / dt
+
+    def z_target(self, target_z: float, fz: float, dt: float) -> float:
+        """While searching: rise if pushing harder than `force`, sink if under half of it."""
+        fz = abs(fz)
+        if fz > self.force:
+            return target_z + self.z_speed * dt
+        if fz < 0.5 * self.force:
+            return target_z - self.z_speed * dt
+        return target_z
 
 
 def contact_descent(desired_z: float, target_z: float, fz: float, min_fz: float, pushing: bool,
