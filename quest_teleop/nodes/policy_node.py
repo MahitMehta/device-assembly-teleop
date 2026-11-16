@@ -47,7 +47,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband, ContactCompliance
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, tool_down, xy_deadband, ContactCompliance, contact_descent
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -94,6 +94,9 @@ class PolicyNode(Node):
                                       max_offset=args.comp_max_mm / 1000, force_gain=args.comp_force_gain / 1000,
                                       force_deadband=args.comp_force_deadband, push_limit=args.comp_push_limit)
         self._comp_chunk = None       # the chunk the offset was last rebased to
+        self._open_since = None       # when the gripper last opened (the offset survives a brief flicker)
+        self._push_z = None           # target height when pushing past --comp-push-limit began
+        self._comp_state = ""
         self.home_q = np.array(args.home_joints, dtype=float)
         self._resync = False
         self._recenter = False
@@ -173,6 +176,8 @@ class PolicyNode(Node):
             self.plan_side = None
             self.comp.reset()         # zeroed from the first reading of the run (arm still, touching nothing)
             self._comp_chunk = None
+            self._open_since = self._push_z = None
+            self._comp_state = ""
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
 
@@ -459,27 +464,36 @@ class PolicyNode(Node):
         self._status(status)
 
     def _comply(self, desired: np.ndarray, q_actual: np.ndarray, chunk) -> np.ndarray:
-        """--compliance: while holding the piece, slide the target away from where the wrist torque
-        says the piece is touching, and stop descending while pushing past --comp-push-limit.
-        'log' computes and logs the same but leaves the target alone."""
+        """--compliance: while holding the piece, slide the target along sideways contact force and
+        away from the edge the wrist torque points to; descend slowly while touching; back off a little
+        when pushing past --comp-push-limit. 'log' computes and logs the same but leaves the target alone."""
         mode, dt = self.args.compliance, 1.0 / self.args.rate
         if mode == "off" or self.force is None or self.torque is None:
             return desired
         self.comp.filter(np.r_[self.force, self.torque], dt)
-        if not self.grip.closed:
-            self.comp.offset[:] = 0.0
-            return desired
+        now = time.monotonic()
         if mode == "on" and chunk is not self._comp_chunk:
             self._comp_chunk = chunk
             self.comp.rebase(getattr(chunk, "comp_at_obs", np.zeros(2)))
-        measured = fk(q_actual)
-        offset = self.comp.step(measured[:3, :3], dt)
+        if self.grip.closed:
+            self._open_since = None
+        elif self._open_since is None:
+            self._open_since = now
+        # A brief open (the policy flickering) keeps the offset; a real release drops it.
+        keep = self.grip.closed or (self._open_since is not None and now - self._open_since < self.args.comp_keep_s)
+        if not keep:
+            self.comp.offset[:] = 0.0
+            self._push_z, self._comp_state = None, ""
+            return desired
+        if self.grip.closed:
+            self.comp.step(fk(q_actual)[:3, :3], dt)
         if mode != "on":
             return desired
         out = desired.copy()
-        out[:2, 3] += offset
-        if self.comp.pushing:
-            out[2, 3] = max(out[2, 3], measured[2, 3])   # no deeper while pushing this hard
+        out[:2, 3] += self.comp.offset
+        out[2, 3], self._push_z, self._comp_state = contact_descent(
+            out[2, 3], self.core.target[2, 3], self.comp.w[2], self.comp.min_fz, self.comp.pushing, self._push_z, dt,
+            descent=self.args.comp_descent_mm_s / 1000, backoff=self.args.comp_backoff_mm / 1000)
         return out
 
     # ---- outputs
@@ -536,8 +550,10 @@ class PolicyNode(Node):
             out += f" contact fwd={rb @ fwd * 1000:+.0f} left={rb @ left * 1000:+.0f}mm"
         out += (f" slide fwd={c.v_base @ fwd * 1000:+.1f} left={c.v_base @ left * 1000:+.1f}mm/s"
                 f" offset fwd={c.offset @ fwd * 1000:+.1f} left={c.offset @ left * 1000:+.1f}mm")
-        if c.pushing:
-            out += " PUSH-HOLD"
+        if self._comp_state:
+            out += f" {self._comp_state}"
+        elif c.pushing:
+            out += " PUSHING"
         return out
 
     def _publish_target(self, T: np.ndarray) -> None:
@@ -619,15 +635,21 @@ def parse_args(argv=None):
                    help="While holding the piece: slide away from where the wrist torque says it touches, and stop "
                         "descending past --comp-push-limit. 'log' only computes and logs it")
     p.add_argument("--comp-speed-mm-s", type=float, default=2.0, help="mm/s it slides away from the contact")
-    p.add_argument("--comp-contact-z", type=float, default=0.19,
-                   help="m along tool z from where the UR reports torque (the pendant's TCP) to the contact")
+    p.add_argument("--comp-contact-z", type=float, default=0.0,
+                   help="m from the flange to where sideways contact force acts, for the contact estimate; 0 (default) "
+                        "ignores the sideways part, which the press test showed is mostly sensor error")
     p.add_argument("--comp-min-fz", type=float, default=3.0, help="N along tool z before it counts as touching")
-    p.add_argument("--comp-min-r-mm", type=float, default=1.5, help="contact this close to the tool axis (mm) counts as centred")
+    p.add_argument("--comp-min-r-mm", type=float, default=8.0,
+                   help="contact estimate this close to the tool axis (mm) counts as centred (it reads ~3x the real offset)")
     p.add_argument("--comp-max-mm", type=float, default=3.0, help="largest sideways offset (mm)")
-    p.add_argument("--comp-force-gain", type=float, default=0.0,
-                   help="mm/s per N of sideways force (chamfers); 0 until its sign is checked on the arm")
+    p.add_argument("--comp-force-gain", type=float, default=1.0,
+                   help="mm/s per N of sideways contact force beyond the dead band (0 disables)")
     p.add_argument("--comp-force-deadband", type=float, default=2.0, help="N of sideways force ignored")
-    p.add_argument("--comp-push-limit", type=float, default=20.0, help="N along tool z past which it stops descending")
+    p.add_argument("--comp-push-limit", type=float, default=12.0, help="N along tool z past which it backs off")
+    p.add_argument("--comp-backoff-mm", type=float, default=0.5, help="how far it rises when pushing past the limit")
+    p.add_argument("--comp-descent-mm-s", type=float, default=2.0, help="fastest descent while touching (mm/s)")
+    p.add_argument("--comp-keep-s", type=float, default=1.0,
+                   help="s the gripper may open (policy flicker) before the sideways offset is dropped")
     p.add_argument("--home-joints", type=float, nargs=6, default=list(DEMO_START_Q), metavar="Q",
                    help="Joints (rad) that B returns to between runs; default: median start of the clear-piece demos")
     p.add_argument("--home-speed", type=float, default=0.3, help="rad/s of the fastest joint when returning to start")

@@ -245,12 +245,16 @@ may run at a time.
    is closed, `--hold-xy-deadband-mm` (2) makes a mostly-downward plan that moves sideways less than
    that go straight down (the demos' last 3 cm of placing were straight down; real corrections there
    were 2-7 mm); `side=` on the status line is each plan's sideways move, `(dropped)` when removed.
-   `--compliance log|on` (off by default) adds a contact layer while the gripper is closed: from the
-   wrist torque and force (tool0_controller, about the flange) it finds where the held piece touches
-   (`contact=`, mm in tool x/y, once |F_z| > `--comp-min-fz`) and slides the target the other way at
-   `--comp-speed-mm-s`, up to `--comp-max-mm`, staying vertical; past `--comp-push-limit` N it stops
-   descending (`PUSH-HOLD`). `log` only prints it: check it first by pressing up on one side of the
-   held piece; `contact=` should point to that side and `comp=` away from it.
+   `--compliance log|on` (off by default) adds a contact layer while the gripper is closed. It slides
+   the target along sideways contact force (`--comp-force-gain` 1 mm/s per N past 2 N) and away from
+   the edge the wrist torque points to (`--comp-speed-mm-s` 2, direction only, beyond
+   `--comp-min-r-mm` 8), up to `--comp-max-mm` 3, staying vertical. While touching (|F_z| >
+   `--comp-min-fz` 3 N) it descends no faster than `--comp-descent-mm-s` 2; past `--comp-push-limit`
+   12 N it rises `--comp-backoff-mm` 0.5 and holds (`PUSH-BACKOFF`). A gripper open shorter than
+   `--comp-keep-s` 1 keeps the offset. Signs and defaults come from a press test on the arm
+   (2026-11-16): pushes on the held piece gave way the right way, and edge presses read the right
+   edge at ~3x its distance. `log` only prints it, and also reports while paused (re-zeroed at each
+   pause) in robot terms (`push fwd/left/up`, `contact`, `slide`, `offset`), for repeating that test.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live

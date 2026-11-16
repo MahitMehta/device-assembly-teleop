@@ -121,14 +121,18 @@ class ContactCompliance:
             r_x = (r_z F_x - tau_y) / F_z,   r_y = (tau_x + r_z F_y) / F_z
         (unchanged if the sensor's sign convention is flipped). Once |F_z| > min_fz and |r| > min_r,
         the tool slides away from r, toward the hole, at `speed` m/s.
-      - Chamfers: sideways force beyond `force_deadband` slides it along that force at
-        `force_gain` m/s per N (0 until its sign has been checked on the arm).
+        Press test on the arm (2026-11-16): the sideways readings during an upward press are mostly
+        sensor error (UR quotes ~3.5 N), and r_z times them swamps the torque, so contact_z defaults to
+        0 (r = (-tau_y, tau_x) / F_z). Then a press under the front/back edge read 27 mm forward/back
+        for a ~8 mm radius piece: right direction, ~3x the size, hence min_r 8 mm. Direction only.
+      - Chamfers and side walls: sideways force beyond `force_deadband` slides it along that force at
+        `force_gain` m/s per N (the force on the tool: pushes on the held piece gave way the right way).
       - Pushing harder than `push_limit` N along tool z: `pushing` is set, and the node stops descending.
     The offset is in base x, y, capped at `max_offset` m."""
 
-    def __init__(self, speed: float = 0.002, contact_z: float = 0.19, min_fz: float = 3.0, min_r: float = 0.0015,
-                 max_offset: float = 0.003, force_gain: float = 0.0, force_deadband: float = 2.0,
-                 push_limit: float = 20.0, filter_s: float = 0.05):
+    def __init__(self, speed: float = 0.002, contact_z: float = 0.0, min_fz: float = 3.0, min_r: float = 0.008,
+                 max_offset: float = 0.003, force_gain: float = 0.001, force_deadband: float = 2.0,
+                 push_limit: float = 12.0, filter_s: float = 0.05):
         self.speed, self.contact_z, self.min_fz, self.min_r = speed, contact_z, min_fz, min_r
         self.max_offset, self.force_gain, self.force_deadband = max_offset, force_gain, force_deadband
         self.push_limit, self.filter_s = push_limit, filter_s
@@ -178,6 +182,22 @@ class ContactCompliance:
         """A new plan starts from the measured pose, which already includes the offset applied when
         its frame was taken: keep only what was added since."""
         self.offset = self.offset - at_plan
+
+
+def contact_descent(desired_z: float, target_z: float, fz: float, min_fz: float, pushing: bool,
+                    push_z: float | None, dt: float, descent: float = 0.002, backoff: float = 0.0005,
+                    backoff_speed: float = 0.005) -> tuple[float, float | None, str]:
+    """Height for the next target while placing (base z, m). target_z: the current target.
+    - Pushing past the limit: rise at `backoff_speed` to `backoff` above where it started pushing,
+      then hold there (the policy may still lift higher).
+    - Touching (|fz| > min_fz): descend no faster than `descent` m/s, so sideways corrections have time.
+    Returns (z, the height where pushing started or None, state for the log)."""
+    if pushing:
+        push_z = target_z if push_z is None else push_z
+        return max(desired_z, min(target_z + backoff_speed * dt, push_z + backoff)), push_z, "PUSH-BACKOFF"
+    if abs(fz) > min_fz:
+        return max(desired_z, target_z - descent * dt), None, "contact-slow"
+    return desired_z, None, ""
 
 
 class GripperHysteresis:

@@ -188,7 +188,7 @@ def _settle(c, w, R=np.eye(3), ticks=125, dt=0.008):
 
 def test_compliance_slides_away_from_an_off_axis_contact():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(contact_z=0.19)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015)
     c.filter(np.zeros(6), 0.008)                    # zero: free air
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.5, 0.0, -10.0]))   # rim contact at +x, a little friction
     assert c.contact is not None and abs(c.contact[0] - 0.004) < 3e-4 and abs(c.contact[1]) < 3e-4
@@ -197,21 +197,21 @@ def test_compliance_slides_away_from_an_off_axis_contact():
 
 def test_compliance_ignores_the_sensor_sign_and_centred_or_light_contact():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(contact_z=0.19)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015)
     c.filter(np.zeros(6), 0.008)
     _settle(c, -_wrench_at([0.0, -0.004, 0.19], [0.0, 0.0, -10.0]))   # flipped convention, contact at -y
     assert c.offset[1] > 0.001
-    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.0005, 0.0, 0.19], [0.0, 0.0, -10.0]))   # centred: inside min_r
     assert np.allclose(c.offset, 0)
-    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -1.0]))    # too light to count
     assert np.allclose(c.offset, 0) and c.contact is None
 
 
 def test_compliance_caps_offset_rebases_and_flags_pushing():
     from quest_teleop.utils.policy_runner import ContactCompliance
-    c = ContactCompliance(max_offset=0.003, push_limit=20.0)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015, force_gain=0.0, max_offset=0.003, push_limit=20.0)
     c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -25.0]), ticks=1000)
     assert abs(np.linalg.norm(c.offset) - 0.003) < 1e-9 and c.pushing
@@ -223,6 +223,43 @@ def test_compliance_turns_tool_frame_motion_into_base():
     from quest_teleop.utils.core import matrix_from_rotvec
     from quest_teleop.utils.policy_runner import ContactCompliance
     R = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))          # tool down: tool y = base -y
-    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    c = ContactCompliance(contact_z=0.19, min_r=0.0015); c.filter(np.zeros(6), 0.008)
     _settle(c, _wrench_at([0.0, 0.004, 0.19], [0.0, 0.0, -10.0]), R=R)   # contact at tool +y
     assert c.offset[1] > 0.001                                   # away = tool -y = base +y
+
+
+def _press_test_compliance():
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    c = ContactCompliance()        # defaults, as set from the press test
+    c.filter(np.zeros(6), 0.008)
+    return c
+
+
+def test_compliance_defaults_reproduce_the_press_test():
+    # Readings from the arm (tool frame; tool -y = robot forward there). Front edge, then back edge.
+    for F, tau, sign in (([0.5, -1.5, -10.0], [0.27, -0.05, 0.0], -1), ([-0.3, 2.4, -8.6], [-0.23, -0.05, 0.0], +1)):
+        c = _press_test_compliance()
+        _settle(c, np.r_[F, tau])
+        assert c.contact is not None and np.sign(c.contact[1]) == sign     # front: tool -y; back: tool +y
+        assert np.sign(c.offset[1]) == -sign                               # slides away from that edge
+
+
+def test_compliance_defaults_follow_sideways_force():
+    c = _press_test_compliance()
+    _settle(c, np.r_[[0.0, -6.5, -1.6], [0.82, 0.0, 0.0]])              # pushed forward (tool -y)
+    assert c.offset[1] < -0.001
+
+
+def test_contact_descent_slows_backs_off_and_releases():
+    from quest_teleop.utils.policy_runner import contact_descent
+    dt = 0.008
+    z, pz, st = contact_descent(0.090, 0.100, -1.0, 3.0, False, None, dt)          # free: as planned
+    assert z == 0.090 and st == ""
+    z, pz, st = contact_descent(0.090, 0.100, -5.0, 3.0, False, None, dt)          # touching: 2 mm/s
+    assert abs(z - (0.100 - 0.002 * dt)) < 1e-12 and st == "contact-slow"
+    target, push_z = 0.100, None
+    for _ in range(200):                                                          # pushing: rise 0.5 mm, hold
+        target, push_z, st = contact_descent(0.090, target, -15.0, 3.0, True, push_z, dt)
+    assert st == "PUSH-BACKOFF" and abs(target - 0.1005) < 1e-9
+    z, _, _ = contact_descent(0.120, 0.100, -15.0, 3.0, True, 0.100, dt)          # policy lifting: allowed
+    assert z == 0.120
