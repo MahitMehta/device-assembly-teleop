@@ -245,6 +245,12 @@ may run at a time.
    is closed, `--hold-xy-deadband-mm` (2) makes a mostly-downward plan that moves sideways less than
    that go straight down (the demos' last 3 cm of placing were straight down; real corrections there
    were 2-7 mm); `side=` on the status line is each plan's sideways move, `(dropped)` when removed.
+   `--compliance log|on` (off by default) adds a contact layer while the gripper is closed: from the
+   wrist torque and force (tool0_controller, about the flange) it finds where the held piece touches
+   (`contact=`, mm in tool x/y, once |F_z| > `--comp-min-fz`) and slides the target the other way at
+   `--comp-speed-mm-s`, up to `--comp-max-mm`, staying vertical; past `--comp-push-limit` N it stops
+   descending (`PUSH-HOLD`). `log` only prints it: check it first by pressing up on one side of the
+   held piece; `contact=` should point to that side and `comp=` away from it.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live

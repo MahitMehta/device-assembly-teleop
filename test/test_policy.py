@@ -173,3 +173,56 @@ def test_xy_deadband_keeps_real_corrections_and_non_descents():
     assert not xy_deadband(c, anchor, 8, 2.0)[2]
     anchor, c = _descent_chunk(side_mm=1.0, down_mm=10.0)
     assert not xy_deadband(c, anchor, 8, 0.0)[2]                 # disabled
+
+
+def _wrench_at(r, F):
+    r, F = np.asarray(r, float), np.asarray(F, float)
+    return np.r_[F, np.cross(r, F)]
+
+
+def _settle(c, w, R=np.eye(3), ticks=125, dt=0.008):
+    for _ in range(ticks):
+        c.filter(w, dt)
+        c.step(R, dt)
+
+
+def test_compliance_slides_away_from_an_off_axis_contact():
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    c = ContactCompliance(contact_z=0.19)
+    c.filter(np.zeros(6), 0.008)                    # zero: free air
+    _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.5, 0.0, -10.0]))   # rim contact at +x, a little friction
+    assert c.contact is not None and abs(c.contact[0] - 0.004) < 3e-4 and abs(c.contact[1]) < 3e-4
+    assert c.offset[0] < -0.001 and abs(c.offset[1]) < 1e-4       # moved toward -x, the hole
+
+
+def test_compliance_ignores_the_sensor_sign_and_centred_or_light_contact():
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    c = ContactCompliance(contact_z=0.19)
+    c.filter(np.zeros(6), 0.008)
+    _settle(c, -_wrench_at([0.0, -0.004, 0.19], [0.0, 0.0, -10.0]))   # flipped convention, contact at -y
+    assert c.offset[1] > 0.001
+    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    _settle(c, _wrench_at([0.0005, 0.0, 0.19], [0.0, 0.0, -10.0]))   # centred: inside min_r
+    assert np.allclose(c.offset, 0)
+    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -1.0]))    # too light to count
+    assert np.allclose(c.offset, 0) and c.contact is None
+
+
+def test_compliance_caps_offset_rebases_and_flags_pushing():
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    c = ContactCompliance(max_offset=0.003, push_limit=20.0)
+    c.filter(np.zeros(6), 0.008)
+    _settle(c, _wrench_at([0.004, 0.0, 0.19], [0.0, 0.0, -25.0]), ticks=1000)
+    assert abs(np.linalg.norm(c.offset) - 0.003) < 1e-9 and c.pushing
+    c.rebase(np.array([-0.002, 0.0]))
+    assert np.allclose(c.offset, [-0.001, 0.0])
+
+
+def test_compliance_turns_tool_frame_motion_into_base():
+    from quest_teleop.utils.core import matrix_from_rotvec
+    from quest_teleop.utils.policy_runner import ContactCompliance
+    R = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))          # tool down: tool y = base -y
+    c = ContactCompliance(); c.filter(np.zeros(6), 0.008)
+    _settle(c, _wrench_at([0.0, 0.004, 0.19], [0.0, 0.0, -10.0]), R=R)   # contact at tool +y
+    assert c.offset[1] > 0.001                                   # away = tool -y = base +y

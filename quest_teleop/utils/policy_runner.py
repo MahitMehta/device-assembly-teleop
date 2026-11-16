@@ -110,6 +110,74 @@ def xy_deadband(chunk: "Chunk", anchor: np.ndarray, n_exec: int, mm: float) -> t
     return Chunk(t0=chunk.t0, dt=chunk.dt, poses=poses, grip=chunk.grip), side, True
 
 
+class ContactCompliance:
+    """Admittance for placing a held piece, as an offset on the policy's position targets (125 Hz,
+    on top of the stiff position servo, like the PBIC layer of arXiv 2603.15152 but for flat landings).
+
+    Uses the UR's wrist wrench (tool0_controller frame), low-passed and zeroed at the start of a run:
+      - Flat landing, piece partly on the rim: the vertical reaction acts off the tool axis, so the
+        torque says where. For a force F at a point r (sensor frame), tau = r x F, so with the contact
+        `contact_z` m along tool z from where the UR reports torque:
+            r_x = (r_z F_x - tau_y) / F_z,   r_y = (tau_x + r_z F_y) / F_z
+        (unchanged if the sensor's sign convention is flipped). Once |F_z| > min_fz and |r| > min_r,
+        the tool slides away from r, toward the hole, at `speed` m/s.
+      - Chamfers: sideways force beyond `force_deadband` slides it along that force at
+        `force_gain` m/s per N (0 until its sign has been checked on the arm).
+      - Pushing harder than `push_limit` N along tool z: `pushing` is set, and the node stops descending.
+    The offset is in base x, y, capped at `max_offset` m."""
+
+    def __init__(self, speed: float = 0.002, contact_z: float = 0.19, min_fz: float = 3.0, min_r: float = 0.0015,
+                 max_offset: float = 0.003, force_gain: float = 0.0, force_deadband: float = 2.0,
+                 push_limit: float = 20.0, filter_s: float = 0.05):
+        self.speed, self.contact_z, self.min_fz, self.min_r = speed, contact_z, min_fz, min_r
+        self.max_offset, self.force_gain, self.force_deadband = max_offset, force_gain, force_deadband
+        self.push_limit, self.filter_s = push_limit, filter_s
+        self.reset()
+
+    def reset(self) -> None:
+        """Start of a run, arm still and touching nothing: the next reading is the zero."""
+        self.zero = None
+        self.w = np.zeros(6)
+        self.offset = np.zeros(2)
+        self.contact = None     # r (m, tool x, y) while touching
+        self.pushing = False
+
+    def filter(self, wrench: np.ndarray, dt: float) -> None:
+        wrench = np.asarray(wrench, float)
+        if self.zero is None:
+            self.zero = wrench.copy()
+        a = dt / (self.filter_s + dt)
+        self.w += a * (wrench - self.zero - self.w)
+        fz = self.w[2]
+        self.pushing = abs(fz) > self.push_limit
+
+    def step(self, R: np.ndarray, dt: float) -> np.ndarray:
+        """Move the offset for one tick (tool0 orientation R in base). Returns the offset (base x, y)."""
+        F, T = self.w[:3], self.w[3:]
+        v = np.zeros(2)
+        self.contact = None
+        if abs(F[2]) > self.min_fz:
+            rz = self.contact_z
+            r = np.array([(rz * F[0] - T[1]) / F[2], (T[0] + rz * F[1]) / F[2]])
+            self.contact = r
+            n = np.linalg.norm(r)
+            if n > self.min_r:
+                v -= self.speed * r / n
+        side = np.linalg.norm(F[:2])
+        if self.force_gain and side > self.force_deadband:
+            v += self.force_gain * (side - self.force_deadband) * F[:2] / side
+        self.offset += (R[:2, :2] @ v) * dt
+        n = np.linalg.norm(self.offset)
+        if n > self.max_offset:
+            self.offset *= self.max_offset / n
+        return self.offset
+
+    def rebase(self, at_plan: np.ndarray) -> None:
+        """A new plan starts from the measured pose, which already includes the offset applied when
+        its frame was taken: keep only what was added since."""
+        self.offset = self.offset - at_plan
+
+
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
     doesn't flicker the gripper. None until the policy first asks to close: commanding open at
