@@ -92,7 +92,8 @@ class PolicyNode(Node):
         self.comp = ContactCompliance(speed=args.comp_speed_mm_s / 1000, contact_z=args.comp_contact_z,
                                       min_fz=args.comp_min_fz, min_r=args.comp_min_r_mm / 1000,
                                       max_offset=args.comp_max_mm / 1000, force_gain=args.comp_force_gain / 1000,
-                                      force_deadband=args.comp_force_deadband, push_limit=args.comp_push_limit)
+                                      force_deadband=args.comp_force_deadband, push_limit=args.comp_push_limit,
+                                      edge_max_side=args.comp_edge_max_side)
         self._comp_chunk = None       # the chunk the offset was last rebased to
         self._open_since = None       # when the gripper last opened (the offset survives a brief flicker)
         self._push_z = None           # target height when pushing past --comp-push-limit began
@@ -482,7 +483,7 @@ class PolicyNode(Node):
         # A brief open (the policy flickering) keeps the offset; a real release drops it.
         keep = self.grip.closed or (self._open_since is not None and now - self._open_since < self.args.comp_keep_s)
         if not keep:
-            self.comp.offset[:] = 0.0
+            self.comp.release()
             self._push_z, self._comp_state = None, ""
             return desired
         if self.grip.closed:
@@ -548,8 +549,8 @@ class PolicyNode(Node):
         if c.contact is not None:
             rb = R[:2, :2] @ c.contact
             out += f" contact fwd={rb @ fwd * 1000:+.0f} left={rb @ left * 1000:+.0f}mm"
-        out += (f" slide fwd={c.v_base @ fwd * 1000:+.1f} left={c.v_base @ left * 1000:+.1f}mm/s"
-                f" offset fwd={c.offset @ fwd * 1000:+.1f} left={c.offset @ left * 1000:+.1f}mm")
+        out += (f" slide[{c.path or '-'}] fwd={c.v_base @ fwd * 1000:+.1f} left={c.v_base @ left * 1000:+.1f}mm/s"
+                f" slid fwd={c.total @ fwd * 1000:+.1f} left={c.total @ left * 1000:+.1f}mm")
         if self._comp_state:
             out += f" {self._comp_state}"
         elif c.pushing:
@@ -641,7 +642,9 @@ def parse_args(argv=None):
     p.add_argument("--comp-min-fz", type=float, default=3.0, help="N along tool z before it counts as touching")
     p.add_argument("--comp-min-r-mm", type=float, default=8.0,
                    help="contact estimate this close to the tool axis (mm) counts as centred (it reads ~3x the real offset)")
-    p.add_argument("--comp-max-mm", type=float, default=3.0, help="largest sideways offset (mm)")
+    p.add_argument("--comp-max-mm", type=float, default=3.0, help="largest total sideways correction per held piece (mm)")
+    p.add_argument("--comp-edge-max-side", type=float, default=0.3,
+                   help="use the torque (edge) estimate only while sideways force is under this fraction of the push")
     p.add_argument("--comp-force-gain", type=float, default=1.0,
                    help="mm/s per N of sideways contact force beyond the dead band (0 disables)")
     p.add_argument("--comp-force-deadband", type=float, default=2.0, help="N of sideways force ignored")

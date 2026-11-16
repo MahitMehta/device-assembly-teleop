@@ -132,10 +132,11 @@ class ContactCompliance:
 
     def __init__(self, speed: float = 0.002, contact_z: float = 0.0, min_fz: float = 3.0, min_r: float = 0.008,
                  max_offset: float = 0.003, force_gain: float = 0.001, force_deadband: float = 2.0,
-                 push_limit: float = 12.0, filter_s: float = 0.05):
+                 push_limit: float = 12.0, filter_s: float = 0.05, edge_max_side: float = 0.3):
         self.speed, self.contact_z, self.min_fz, self.min_r = speed, contact_z, min_fz, min_r
         self.max_offset, self.force_gain, self.force_deadband = max_offset, force_gain, force_deadband
         self.push_limit, self.filter_s = push_limit, filter_s
+        self.edge_max_side = edge_max_side   # torque (edge) path only while sideways force < this x |F_z|
         self.reset()
 
     def reset(self) -> None:
@@ -146,6 +147,13 @@ class ContactCompliance:
         self.contact = None     # r (m, tool x, y) while touching
         self.pushing = False
         self.v_base = np.zeros(2)   # the slide this tick (m/s, base x, y)
+        self.total = np.zeros(2)    # everything slid while holding this piece (base x, y), capped at max_offset
+        self.path = ""              # which term is sliding: "force", "edge" or ""
+
+    def release(self) -> None:
+        """The piece was let go: the next one starts from no correction."""
+        self.offset[:] = 0.0
+        self.total[:] = 0.0
 
     def filter(self, wrench: np.ndarray, dt: float) -> None:
         wrench = np.asarray(wrench, float)
@@ -161,21 +169,28 @@ class ContactCompliance:
         F, T = self.w[:3], self.w[3:]
         v = np.zeros(2)
         self.contact = None
-        if abs(F[2]) > self.min_fz:
+        self.path = ""
+        side = np.linalg.norm(F[:2])
+        # The edge estimate only holds for a nearly vertical push: real sideways contact force acts
+        # ~0.15-0.19 m down the tool and its torque swamps the off-centre push (first --compliance on run).
+        if abs(F[2]) > self.min_fz and side < self.edge_max_side * abs(F[2]):
             rz = self.contact_z
             r = np.array([(rz * F[0] - T[1]) / F[2], (T[0] + rz * F[1]) / F[2]])
             self.contact = r
             n = np.linalg.norm(r)
             if n > self.min_r:
                 v -= self.speed * r / n
-        side = np.linalg.norm(F[:2])
+                self.path = "edge"
         if self.force_gain and side > self.force_deadband:
             v += self.force_gain * (side - self.force_deadband) * F[:2] / side
+            self.path = "force"
         self.v_base = R[:2, :2] @ v
-        self.offset += self.v_base * dt
-        n = np.linalg.norm(self.offset)
-        if n > self.max_offset:
-            self.offset *= self.max_offset / n
+        total = self.total + self.v_base * dt
+        n = np.linalg.norm(total)
+        if n > self.max_offset:            # the cap is on the whole correction, across plans
+            total *= self.max_offset / n
+        self.offset += total - self.total
+        self.total = total
         return self.offset
 
     def rebase(self, at_plan: np.ndarray) -> None:

@@ -248,7 +248,9 @@ may run at a time.
    `--compliance log|on` (off by default) adds a contact layer while the gripper is closed. It slides
    the target along sideways contact force (`--comp-force-gain` 1 mm/s per N past 2 N) and away from
    the edge the wrist torque points to (`--comp-speed-mm-s` 2, direction only, beyond
-   `--comp-min-r-mm` 8), up to `--comp-max-mm` 3, staying vertical. While touching (|F_z| >
+   `--comp-min-r-mm` 8, only while sideways force is under `--comp-edge-max-side` 0.3 of the push),
+   up to `--comp-max-mm` 3 in total per held piece, staying vertical; the log shows which term slides
+   (`slide[force|edge]`) and the total (`slid`). While touching (|F_z| >
    `--comp-min-fz` 3 N) it descends no faster than `--comp-descent-mm-s` 2; past `--comp-push-limit`
    12 N it rises `--comp-backoff-mm` 0.5 and holds (`PUSH-BACKOFF`). A gripper open shorter than
    `--comp-keep-s` 1 keeps the offset. Signs and defaults come from a press test on the arm
