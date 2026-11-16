@@ -99,3 +99,17 @@ def test_auto_stop_waits_for_release_then_stillness():
     assert a.plan(still, 8, 10.8)                                    # 2 s of stillness after release
     a.reset()
     assert not a.plan(still, 8, 20.0)
+
+
+def test_wrench_filter_zeroes_then_averages_the_last_tenth_of_a_second():
+    from quest_teleop.utils.policy_runner import WrenchFilter
+    f = WrenchFilter()
+    assert f.value(0.0) is None and not f.zero(0.0)          # nothing yet
+    for i in range(500):                                       # 1 s at 500 Hz, 2 N offset on x
+        f.add(i * 0.002, [2.0, 0, 0, 0, 0, 0])
+    assert f.zero(0.998) and np.allclose(f.bias, [2, 0, 0, 0, 0, 0])
+    for i in range(500, 600):                                  # then a 20 N push on z
+        f.add(i * 0.002, [2.0, 0, 20.0, 0, 0, 0.5])
+    v = f.value(1.198)
+    assert np.allclose(v, [0, 0, 20.0, 0, 0, 0.5])
+    assert f.value(1.5) is None                                # stream stopped: stale

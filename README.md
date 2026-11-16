@@ -265,6 +265,12 @@ to about +/-0.5 deg. It logs e.g. `camera mount turned +1.8 deg from the demos (
 out of range, a live run doesn't start (`--mount-tolerance-deg`, `--skip-mount-check`). With the
 gripper closed or the finger not found it only warns.
 
+**Force/torque input.** A policy trained with `wrench` in its `state` also gets the wrist
+force/torque from `/force_torque_sensor_broadcaster/wrench`: the mean of the last 0.1 s, minus its
+median over the 0.5 s before the run started, as each demo was zeroed. So start runs with the arm
+still and the gripper open, touching nothing. Resumed with the gripper closed, it keeps the previous
+run's zero. The log shows what the policy sees as `ft_in=…N`; with no readings for 0.1 s the run pauses.
+
 **Stopping it:** Enter pauses (the arm holds; the node keeps running). Ctrl-C stops sending
 commands at once and quits: the controller holds the last commanded position, at most one 8 ms
 step ahead, and the gripper stays as it is. The pendant's stop or the e-stop is the hardware

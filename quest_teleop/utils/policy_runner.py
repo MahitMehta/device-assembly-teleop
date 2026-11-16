@@ -6,8 +6,8 @@ A deployed policy is a directory, made by scripts/deploy_policy.sh:
     <dir>/src/dit_policy  the policy code it was trained with (so code and weights always match)
     <dir>/meta.json       the training dataset's meta.json (stored image size), optional
 
-Policies trained with state inputs (config `state`) also need the measured tool0 pose and jaw
-gap with each image; image-only ones ignore them.
+Policies trained with state inputs (config `state`) also need the measured tool0 pose, jaw gap and,
+for `wrench`, the filtered wrist force/torque with each image; image-only ones ignore them.
 
 The pieces that need no torch (preprocessing, waypoint timing, gripper hysteresis) are here too,
 so they can be tested without a GPU.
@@ -116,8 +116,11 @@ class DiTRunner:
     def reset(self) -> None:
         self.policy.reset()
 
-    def observe(self, rgb: np.ndarray, tool0: np.ndarray | None = None, gripper_width: float | None = None) -> None:
-        if self.state_keys:
+    def observe(self, rgb: np.ndarray, tool0: np.ndarray | None = None, gripper_width: float | None = None,
+                wrench: np.ndarray | None = None) -> None:
+        if "wrench" in self.state_keys:
+            self.policy.observe(rgb, tool0, gripper_width, wrench)
+        elif self.state_keys:   # policies from before the wrench input take three arguments
             self.policy.observe(rgb, tool0, gripper_width)
         else:
             self.policy.observe(rgb)
@@ -130,7 +133,7 @@ class DiTRunner:
 
     def warmup(self) -> None:
         """One plan on a blank image, so CUDA kernels compile before the arm moves."""
-        self.observe(np.zeros((*self.hw, 3), np.uint8), np.eye(4), 0.085)
+        self.observe(np.zeros((*self.hw, 3), np.uint8), np.eye(4), 0.085, np.zeros(6))
         self.policy.plan()
         self.reset()
 
@@ -138,7 +141,7 @@ class DiTRunner:
 def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) -> None:
     """Child process: owns torch and the policy, so planning never competes with the ROS
     callbacks and control loop for the interpreter lock. Messages:
-      ("observe", jpeg, tool0, width)  decode, resize, append to the history (no reply)
+      ("observe", jpeg, tool0, width, wrench)  decode, resize, append to the history (no reply)
       ("plan", tool0, t)     reply ("chunk", Chunk, ms)
       ("reset",)             clear the frame history (no reply)
     On start it replies ("ready", info) after a warm-up plan, or ("error", text).
@@ -162,7 +165,7 @@ def _planner_main(conn, policy_dir: str, checkpoint: str, device: str | None) ->
             return
         if msg[0] == "observe":
             try:
-                r.observe(preprocess(msg[1], r.hw), msg[2], msg[3])
+                r.observe(preprocess(msg[1], r.hw), *msg[2:])
             except ValueError:
                 pass   # an undecodable frame: keep the history as it was
         elif msg[0] == "plan":
@@ -194,8 +197,9 @@ class PlannerProcess:
         self.state_keys = tuple(info.get("state", ()))
         self.mount_rotation_deg = float(info.get("mount_rotation_deg", 0.0))   # trained-in mount-turn augmentation
 
-    def observe(self, jpeg: bytes, tool0: np.ndarray | None = None, gripper_width: float | None = None) -> None:
-        self._conn.send(("observe", jpeg, tool0, gripper_width))
+    def observe(self, jpeg: bytes, tool0: np.ndarray | None = None, gripper_width: float | None = None,
+                wrench: np.ndarray | None = None) -> None:
+        self._conn.send(("observe", jpeg, tool0, gripper_width, wrench))
 
     def reset(self) -> None:
         self._conn.send(("reset",))
@@ -215,6 +219,48 @@ class PlannerProcess:
         self._proc.join(timeout=2.0)
         if self._proc.is_alive():
             self._proc.terminate()
+
+
+class WrenchFilter:
+    """The wrist wrench as policies with a `wrench` input were trained on (dit_policy.geometry.
+    WRENCH_FILTER, convert_rosbags.wrench_at): the mean of the last 0.1 s of samples, minus the
+    median over the 0.5 s before the run started, when the arm was still and touching nothing.
+    Thread-safe: add() from the 500 Hz subscription, the rest from the policy thread."""
+
+    WINDOW_S, ZERO_S = 0.1, 0.5
+
+    def __init__(self, keep_s: float = 1.0):
+        import collections
+        import threading
+        self._buf = collections.deque()
+        self._lock = threading.Lock()
+        self.keep_s = keep_s
+        self.bias = None
+
+    def add(self, t: float, w) -> None:
+        with self._lock:
+            self._buf.append((t, np.asarray(w, float)))
+            while self._buf and self._buf[0][0] < t - self.keep_s:
+                self._buf.popleft()
+
+    def _since(self, t0: float) -> np.ndarray:
+        with self._lock:
+            return np.array([w for t, w in self._buf if t > t0]).reshape(-1, 6)
+
+    def zero(self, now: float) -> bool:
+        """Take the bias from the last ZERO_S s. False if there are no samples."""
+        w = self._since(now - self.ZERO_S)
+        if not len(w):
+            return False
+        self.bias = np.median(w, 0)
+        return True
+
+    def value(self, now: float) -> np.ndarray | None:
+        """Filtered, zeroed wrench (6,), or None if nothing arrived in the last WINDOW_S s (or never zeroed)."""
+        w = self._since(now - self.WINDOW_S)
+        if not len(w) or self.bias is None:
+            return None
+        return w.mean(0) - self.bias
 
 
 class AutoStop:

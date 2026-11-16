@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Runs a trained image-only DiT policy on the UR5e, through the same driver, controller, safety
-holds and motion limits as teleop_node.
+"""Runs a trained DiT policy (wrist images, plus any state inputs it was trained with) on the
+UR5e, through the same driver, controller, safety holds and motion limits as teleop_node.
 
 Dry-run is the default: it plans and logs and publishes /policy/target_pose, but sends nothing to
 the arm or gripper. This node never switches controllers.
@@ -43,7 +43,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, preprocess
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -60,6 +60,11 @@ class PolicyNode(Node):
         self.q_actual, self.joint_time = None, 0.0
         self.robot_mode = self.safety_mode = self.speed_scaling = None
         self.force = self.torque = self.force_baseline = None
+        # Wrist force/torque as a policy input (`wrench` in the policy's state): filtered and zeroed
+        # per run exactly as the training data was (WrenchFilter).
+        self.uses_wrench = "wrench" in runner.state_keys
+        self.wrench = WrenchFilter()
+        self.wrench_in = None   # the last value given to the policy
         self.jpeg, self.image_time = None, 0.0
         self.image_seq = 0
         self.mount_ref = mount_check.load_reference()
@@ -117,6 +122,8 @@ class PolicyNode(Node):
     def _on_wrench(self, msg) -> None:
         f, t = msg.wrench.force, msg.wrench.torque
         self.force, self.torque = np.array([f.x, f.y, f.z]), np.array([t.x, t.y, t.z])
+        if self.uses_wrench:
+            self.wrench.add(time.monotonic(), [f.x, f.y, f.z, t.x, t.y, t.z])
 
     def _on_image(self, msg: CompressedImage) -> None:
         with self.lock:   # keep only the newest; decode at 10 Hz in the policy thread
@@ -133,6 +140,8 @@ class PolicyNode(Node):
         elif self.core is None:
             self.get_logger().warning("Not starting: no joint states yet")
         elif not self._mount_ok():
+            pass
+        elif not self._zero_wrench():
             pass
         else:
             with self.lock:
@@ -187,6 +196,27 @@ class PolicyNode(Node):
         log.warning(f"{msg} (dry run: starting anyway)")
         return True
 
+    def _zero_wrench(self) -> bool:
+        """Before a run of a wrench policy: take the force/torque zero from the last 0.5 s, as each
+        demo was zeroed over the still, untouched 0.5 s before it started. With the gripper closed
+        (resuming mid-task, maybe holding the piece or touching the fixture) it keeps the previous
+        zero instead. False (don't start) if there has never been a reading."""
+        if not self.uses_wrench:
+            return True
+        log = self.get_logger()
+        if self.grip.closed:
+            if self.wrench.bias is not None:
+                log.info("force/torque input: gripper closed, keeping the zero from the previous run")
+                return True
+            log.warning("force/torque input: zeroing with the gripper closed; start with it open and nothing touching")
+        if not self.wrench.zero(time.monotonic()):
+            log.error("Not starting: no /force_torque_sensor_broadcaster/wrench readings (the policy needs them)")
+            return False
+        b = self.wrench.bias
+        log.info(f"force/torque input zeroed: offset {np.linalg.norm(b[:3]):.1f} N, {np.linalg.norm(b[3:]):.2f} N m "
+                 f"(keep the arm still and touching nothing when starting)")
+        return True
+
     def _pause(self, why: str) -> None:
         if self.running:
             self.get_logger().info(f"Run stopped: {why}{self._readout()}")
@@ -219,7 +249,14 @@ class PolicyNode(Node):
                 self._pause(f"camera image {'missing' if jpeg is None else f'{age * 1000:.0f} ms old'}")
                 continue
             t_obs, tool0 = time.monotonic(), fk(q)
-            self.runner.observe(jpeg, tool0, self._jaw_gap())   # decoded and resized in the policy process
+            wrench = None
+            if self.uses_wrench:
+                wrench = self.wrench.value(t_obs)
+                if wrench is None:
+                    self._pause("no force/torque readings in the last 0.1 s")
+                    continue
+                self.wrench_in = wrench
+            self.runner.observe(jpeg, tool0, self._jaw_gap(), wrench)   # decoded and resized in the policy process
             if k % self.runner.n_exec == 0:
                 try:
                     chunk, ms = self.runner.plan(tool0, t_obs)
@@ -337,6 +374,8 @@ class PolicyNode(Node):
                 with self.lock:
                     age = max(0.0, time.monotonic() - self.image_time)
                 extra += f" image_age={age * 1000:.0f}ms"
+                if self.wrench_in is not None:
+                    extra += f" ft_in={np.linalg.norm(self.wrench_in[:3]):.1f}N"
             self.get_logger().info(f"[{mode}] {status}{extra} |{self._readout()}")
 
     def _publish_target(self, T: np.ndarray) -> None:
