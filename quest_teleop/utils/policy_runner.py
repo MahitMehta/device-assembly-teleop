@@ -71,6 +71,27 @@ def _slerp(Ra: np.ndarray, Rb: np.ndarray, f: float) -> np.ndarray:
     return matrix_from_rotvec(f * rotvec_from_matrix(Rb @ Ra.T)) @ Ra
 
 
+def tilt_of(R: np.ndarray) -> tuple[float, np.ndarray]:
+    """Tilt of a tool0 orientation (base frame) from pointing straight down: (deg, direction), the
+    direction being where the fingertips lean, as a unit (x, y) in the tool's own frame
+    (zeros when vertical)."""
+    z = R[:, 2]
+    deg = float(np.degrees(np.arccos(np.clip(-z[2], -1.0, 1.0))))
+    lean = (R.T @ np.array([z[0], z[1], 0.0]))[:2]   # horizontal part of the tool axis, in tool x/y
+    n = np.linalg.norm(lean)
+    return deg, (lean / n if n > 1e-9 else np.zeros(2))
+
+
+def tool_down(chunk: "Chunk") -> "Chunk":
+    """The chunk with every pose turned to point straight down, keeping its position and yaw
+    (TeleopCore's pointing_down). For tasks whose demos were all vertical."""
+    from quest_teleop.utils.core import pointing_down
+    poses = chunk.poses.copy()
+    for T in poses:
+        T[:3, :3] = pointing_down(T[:3, :3])
+    return Chunk(t0=chunk.t0, dt=chunk.dt, poses=poses, grip=chunk.grip)
+
+
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
     doesn't flicker the gripper. None until the policy first asks to close: commanding open at

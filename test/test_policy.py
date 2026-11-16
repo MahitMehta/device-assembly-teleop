@@ -113,3 +113,36 @@ def test_wrench_filter_zeroes_then_averages_the_last_tenth_of_a_second():
     v = f.value(1.198)
     assert np.allclose(v, [0, 0, 20.0, 0, 0, 0.5])
     assert f.value(1.5) is None                                # stream stopped: stale
+
+
+def test_tool_down_keeps_position_and_yaw_and_points_down():
+    from quest_teleop.utils.core import matrix_from_rotvec
+    from quest_teleop.utils.policy_runner import tilt_of, tool_down
+    down = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))
+    yaw = matrix_from_rotvec(np.array([0.0, 0.0, 0.4]))
+    tip = matrix_from_rotvec(np.array([0.05, -0.03, 0.0]))
+    poses = np.repeat(np.eye(4)[None], 3, axis=0)
+    for i, T in enumerate(poses):
+        T[:3, :3] = tip @ yaw @ down
+        T[:3, 3] = [0.1 * i, 0.2, 0.3]
+    c = Chunk(t0=0.0, dt=0.1, poses=poses, grip=np.zeros(3))
+    assert tilt_of(poses[0][:3, :3])[0] > 3.0
+    out = tool_down(c)
+    for a, b in zip(c.poses, out.poses):
+        assert tilt_of(b[:3, :3])[0] < 1e-6
+        assert np.allclose(a[:3, 3], b[:3, 3])
+        # heading of tool x in the horizontal plane is kept
+        ha, hb = a[:2, 0] / np.linalg.norm(a[:2, 0]), b[:2, 0] / np.linalg.norm(b[:2, 0])
+        assert ha @ hb > np.cos(np.radians(1.0))
+    assert np.array_equal(c.poses, poses)   # input untouched
+
+
+def test_tilt_of_reports_lean_in_tool_frame():
+    from quest_teleop.utils.core import matrix_from_rotvec
+    from quest_teleop.utils.policy_runner import tilt_of
+    down = matrix_from_rotvec(np.array([np.pi, 0.0, 0.0]))
+    assert tilt_of(down)[0] < 1e-6 and np.allclose(tilt_of(down)[1], 0)
+    # turn about the tool's own y axis: the fingertips lean along tool x
+    R = down @ matrix_from_rotvec(np.array([0.0, 0.1, 0.0]))
+    deg, lean = tilt_of(R)
+    assert abs(deg - np.degrees(0.1)) < 1e-6 and abs(abs(lean[0]) - 1) < 1e-6

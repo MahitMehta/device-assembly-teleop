@@ -238,7 +238,10 @@ may run at a time.
    median start of the 45 clear-piece demos) at `--home-speed` (0.3 rad/s), all joints arriving
    together; B again stops it. It refuses if a joint would turn more than `--home-max-move`
    (1.5 rad), and stops on any hold or if the path would go below the floor. The gripper is left
-   as it is.
+   as it is. `--tool-down` keeps every planned pose pointing straight down and uses only the
+   predicted yaw (the clear-piece demos were all within 0.3 deg of vertical at the grasp). The status
+   line shows `tilt=` (measured) and `planned=` (what the policy asked for, before `--tool-down`),
+   each with `lean=(x,y)`: which way the fingertips lean, in the tool's own frame.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live
