@@ -78,6 +78,7 @@ class PolicyNode(Node):
         self.chunk = None             # the Chunk being followed
         self.plans = 0
         self.plan_ms = []
+        self.opening = self.min_opening = None   # policy's predicted jaw opening (m): now, and lowest this run
         self._resync = False
         self._recenter = False
         self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
@@ -102,6 +103,7 @@ class PolicyNode(Node):
         self.status_pub = self.create_publisher(String, "/policy/status", 10)
         self.running_pub = self.create_publisher(Bool, "/policy/running", 10)
         self.grip_cmd_pub = self.create_publisher(Float64, "/policy/gripper_command", 10)
+        self.opening_pub = self.create_publisher(Float64, "/policy/predicted_opening", 10)
         self.gripper = None
         if args.live and not args.no_gripper:
             self.gripper = GripperWorker(URCapGripper(args.gripper_ip, sid=args.gripper_sid),
@@ -149,6 +151,7 @@ class PolicyNode(Node):
             self._resync = True        # done by the control loop, which owns self.core
             self._recenter = True      # the workspace box follows each run's start pose
             self.run_start = time.monotonic()
+            self.opening = self.min_opening = None
             self.running = True
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
 
@@ -339,6 +342,9 @@ class PolicyNode(Node):
                 self.force_baseline = self.force.copy()
             desired, opening = chunk.at(time.monotonic())
             q_cmd = self.core.follow(desired, 1.0 / self.args.rate)
+            self.opening = float(opening)
+            self.min_opening = self.opening if self.min_opening is None else min(self.min_opening, self.opening)
+            self.opening_pub.publish(Float64(data=self.opening))
             changed = self.grip.update(opening)
             if changed is not None:
                 self.get_logger().info(f"gripper -> {'close' if changed else 'open'} (policy opening {opening * 1000:.0f} mm)")
@@ -374,6 +380,9 @@ class PolicyNode(Node):
                 with self.lock:
                     age = max(0.0, time.monotonic() - self.image_time)
                 extra += f" image_age={age * 1000:.0f}ms"
+                if self.opening is not None:
+                    extra += (f" opening={self.opening * 1000:.0f}mm (min {self.min_opening * 1000:.0f},"
+                              f" closes <{self.args.grip_close_below * 1000:.0f})")
                 if self.wrench_in is not None:
                     extra += f" ft_in={np.linalg.norm(self.wrench_in[:3]):.1f}N"
             self.get_logger().info(f"[{mode}] {status}{extra} |{self._readout()}")
