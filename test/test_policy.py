@@ -315,3 +315,17 @@ def test_policy_anchor_must_match_the_training_frame():
     assert np.allclose(driver @ still_action, fk_pose)            # anchored on the driver pose: no motion
     moved = fk_pose @ still_action                                # anchored on fk: a step every plan
     assert np.linalg.norm(moved[:3, 3] - fk_pose[:3, 3]) > 0.001
+
+
+def test_dataset_nominal_fk_matches_the_robot_nodes():
+    # policy/dit_policy/geometry.ur5e_fk labels datasets; core.fk runs the robot. They must agree.
+    import pathlib, sys
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "policy"))
+    pytest = __import__("pytest")
+    geometry = pytest.importorskip("dit_policy.geometry")
+    from quest_teleop.utils.core import fk
+    rng = np.random.default_rng(0)
+    qs = rng.uniform(-np.pi, np.pi, (20, 6))
+    batch = geometry.ur5e_fk(qs)
+    for q, T in zip(qs, batch):
+        assert np.allclose(T, fk(q), atol=1e-12)

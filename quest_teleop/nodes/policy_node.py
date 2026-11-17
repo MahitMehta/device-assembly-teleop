@@ -46,7 +46,7 @@ from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACK
 from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
-from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, tilt_of, ContactCompliance, SpiralSearch, contact_descent
+from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, pose_source, tilt_of, ContactCompliance, SpiralSearch, contact_descent
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
@@ -76,6 +76,9 @@ class PolicyNode(Node):
         self.jpeg, self.image_time = None, 0.0
         self.image_seq = 0
         self.mount_ref = mount_check.load_reference()
+        # The tool0 the policy plans from must be the one its dataset measured (see _anchor).
+        self.anchor = args.anchor if args.anchor != "auto" else (
+            "fk" if pose_source(args.policy_dir) == "nominal_fk" else "driver")
         # Mount turn the policy should cope with: what it was trained with, else ~1 deg (only the crop shifts).
         self.mount_tolerance = (args.mount_tolerance_deg if args.mount_tolerance_deg is not None
                                 else runner.mount_rotation_deg or 1.0)
@@ -153,8 +156,10 @@ class PolicyNode(Node):
         inv(driver's tcp_pose) @ teleop's command, and the two come from different kinematics (the
         controller's calibrated model vs core.fk's nominal one, ~1.2 mm and 0.3 deg apart here), so a
         still arm reads as a constant small action. Anchored on fk(q) instead, that action moves the
-        arm every plan: the steady creep and tilt. --anchor driver uses the same pose as training."""
-        if self.args.anchor == "fk":
+        arm every plan: the steady creep and tilt. The anchor must match the dataset: 'driver' for those
+        (the older ones, tcp_pose from the driver), 'fk' for datasets converted with --pose-source
+        nominal_fk, where a still arm is a zero action on any UR5e. --anchor auto reads meta.json."""
+        if self.anchor == "fk":
             return fk(q)
         with self.lock:
             T, age = self.tcp_pose, time.monotonic() - self.tcp_time
@@ -677,9 +682,10 @@ def parse_args(argv=None):
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N")
     p.add_argument("--box-half-extent", type=float, default=0.35, help="m the tool may move from where the run started, per axis (the demos went up to 30 cm)")
     p.add_argument("--min-z", type=float, default=0.01)
-    p.add_argument("--anchor", choices=("driver", "fk"), default="driver",
-                   help="tool0 the policy plans from: 'driver' (/tcp_pose_broadcaster/pose, as in training) or 'fk' "
-                        "(nominal kinematics; makes a still arm creep ~1.2 mm and tilt ~0.3 deg per plan here)")
+    p.add_argument("--anchor", choices=("auto", "driver", "fk"), default="auto",
+                   help="tool0 the policy plans from; it must match how its dataset measured tool0. auto (default): "
+                        "from the policy's meta.json pose_source: nominal_fk -> fk (core.fk of the joints), else "
+                        "driver (/tcp_pose_broadcaster/pose, the older datasets; fk there creeps ~1.2 mm/plan)")
     p.add_argument("--compliance", choices=("off", "log", "on"), default="off",
                    help="While holding the piece: slide away from where the wrist torque says it touches, and stop "
                         "descending past --comp-push-limit. 'log' only computes and logs it")
@@ -751,6 +757,10 @@ def main(argv=None) -> int:
         tol = args.mount_tolerance_deg if args.mount_tolerance_deg is not None else runner.mount_rotation_deg or 1.0
         print(f"Camera mount check before each run: within +/-{tol:g} deg of the demos "
               f"({'trained with' if runner.mount_rotation_deg else 'no'} mount-rotation augmentation)", flush=True)
+    from quest_teleop.utils.policy_runner import pose_source
+    src = pose_source(args.policy_dir)
+    anchor = args.anchor if args.anchor != "auto" else ("fk" if src == "nominal_fk" else "driver")
+    print(f"Policy anchor: {anchor} (dataset pose_source: {src}{'' if args.anchor == 'auto' else ', set by --anchor'})", flush=True)
     print(f"Inputs: wrist images{''.join(', ' + k for k in runner.state_keys)}"
           + (" (jaw gap guessed from the commands: no gripper connection without --live, or --no-gripper)"
              if "gripper_width" in runner.state_keys and (args.no_gripper or not args.live) else ""),

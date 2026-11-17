@@ -211,7 +211,7 @@ the laptop can't push), so each recording's calibration can be traced.
 
 ## Learned policy
 
-`policy_node` runs a policy trained in `DeviceAssembly/policy` (image-only DiT, wrist camera in,
+`policy_node` runs a policy trained in `policy/` (this repo) (image-only DiT, wrist camera in,
 tool0 targets and gripper out) on the arm, **in place of** `teleop`: same driver, same
 `forward_position_controller`, same holds and limits (below). Only one of `teleop` and `policy`
 may run at a time.

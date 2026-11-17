@@ -31,6 +31,16 @@ def image_hw(policy_dir: str | pathlib.Path) -> tuple[int, int]:
     return DEFAULT_IMAGE_HW
 
 
+def pose_source(policy_dir: str | pathlib.Path) -> str:
+    """Which measured tool0 the policy was trained on (its dataset's meta.json "pose_source"):
+    "nominal_fk" (core.fk of the joints) or "driver" (/tcp_pose_broadcaster/pose). Datasets from
+    before the field existed used the driver's pose."""
+    meta = pathlib.Path(policy_dir) / "meta.json"
+    if meta.exists():
+        return json.loads(meta.read_text()).get("pose_source", "driver")
+    return "driver"
+
+
 def preprocess(jpeg: bytes, hw: tuple[int, int]) -> np.ndarray:
     """JPEG from /camera/camera/color/image_raw/compressed -> (H, W, 3) uint8 RGB at the stored size.
     Exactly as convert_rosbags.py made the training images (INTER_AREA from 640x480, then BGR->RGB)."""

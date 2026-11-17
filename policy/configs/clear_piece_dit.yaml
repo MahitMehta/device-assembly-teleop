@@ -1,0 +1,64 @@
+# DiT policy for the clear-piece insertion (45 real demos, 10 Hz).
+obs_horizon: 2           # current + previous wrist frame (and robot state at those frames)
+# Robot state inputs per frame, besides the images (geometry.STATE_DIMS); [] = image-only.
+#   gripper_width: measured jaw gap, so it knows whether it is holding the piece
+#   gravity_tool:  which way is down in the tool frame (tilt, no yaw), for the vertical insertion;
+#                  yaw comes from the images, so a rotated fixture isn't answered from memory
+#                  (ee_rot6d would add yaw relative to the robot base)
+#   wrench:        wrist force/torque, 0.1 s mean, zeroed at the start (needs wrench.npy from
+#                  convert_rosbags.py); what the camera can't see during insertion
+#                  e.g. --set "state=[gripper_width,gravity_tool,wrench]"
+# No position or joint angles: with the fixture always in one place they would let it memorise
+# where to go instead of looking.
+state: [gripper_width, gravity_tool]
+action_horizon: 16       # predicted chunk: 1.6 s at 10 Hz
+exec_horizon: 8          # executed before replanning
+action_space: rel_ee     # rel_ee: tool0 targets in the current tool0 frame | abs_ee: in base
+action_dim: 10           # xyz + rot6d + gripper opening (m)
+crop_hw: [176, 240]      # random crop of the stored 192x256 frames (centre crop at test time)
+
+model:
+  d_model: 384
+  depth: 8
+  heads: 6
+  dropout: 0.1
+  token_hw: [6, 8]       # image tokens per frame
+  pretrained_encoder: true
+  group_norm: true
+
+diffusion:
+  train_steps: 100
+  inference_steps: 16    # DDIM
+  beta_schedule: squaredcos_cap_v2
+  prediction_type: epsilon
+
+train:
+  seed: 0
+  steps: 100000
+  batch_size: 128
+  lr: 3.0e-4
+  encoder_lr_scale: 0.1  # pretrained ResNet trunk moves slower
+  weight_decay: 1.0e-3
+  warmup_steps: 1000
+  grad_clip: 1.0
+  ema_decay: 0.999
+  color_jitter: [0.3, 0.3, 0.3]   # brightness, contrast, saturation
+  state_noise_std: 0.02  # on the normalized state: ~0.9 mm of width, ~1 deg of orientation
+  # The camera mount clamps round the wrist and may sit a few degrees round from where the demos
+  # were recorded (re-mounting). That rotates the image about where the tool axis meets the work
+  # surface (dataset._rotate). deg: 0 turns it off. pivot in stored-image pixels (256x192), from
+  # the camera calibration; jitter covers its shift with distance and the exact mount tilt.
+  mount_rotation: {deg: 3.0, pivot_xy: [165, 110], pivot_jitter_px: 30}
+  # Favour shorter (faster, more decisive) demos: an episode's share of the batches is
+  # proportional to length**-power. 1.0 = the 35 s demo gets 1.77x the batches of the 61 s one (a frame
+  # from it is drawn 3.1x as often); 0 = every demo equal; null = uniform over frames (long demos
+  # count more, the old behaviour).
+  episode_weight_power: 1.0
+  val_episodes: 3        # newest demos held out for action-error tracking
+  train_shortest: null   # N: train on the N shortest demos only, validate on the rest (overrides val_episodes)
+  val_samples: 512
+  num_workers: 12
+  log_every: 100
+  val_every: 2000
+  save_every: 1000
+  keep_every: 20000
