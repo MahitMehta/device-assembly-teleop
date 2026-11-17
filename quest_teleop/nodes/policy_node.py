@@ -5,6 +5,10 @@ UR5e, through the same driver, controller, safety holds and motion limits as tel
 Dry-run is the default: it plans and logs and publishes /policy/target_pose, but sends nothing to
 the arm or gripper. This node never switches controllers.
 
+--force-mode on (live): while the gripper holds the piece and the plan goes down, the arm is put in
+UR force mode (force_mode_controller, activate it first) and gives way to contact along --fm-axes;
+it leaves force mode when the gripper opens, the plan lifts, or the run stops for any reason.
+
 Enter starts a run, Enter again pauses it (the arm holds where it is), B (while paused, live only)
 moves the arm back to the demos' start pose (--home-joints), Ctrl-C quits. Each run
 starts the policy fresh (no frames from before the pause). A run pauses by itself after
@@ -33,13 +37,16 @@ import time
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, WrenchStamped
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import Bool, Float64, Float64MultiArray, String
+from std_srvs.srv import Trigger
 from ur_dashboard_msgs.msg import RobotMode, SafetyMode
+from ur_msgs.srv import SetForceMode
+from controller_manager_msgs.srv import ListControllers
 
 from quest_teleop.nodes.teleop_node import (CONTROLLER, JOINT_STALE_S, MAX_TRACKING_ERROR, ROBOT_RUNNING,
                                             SAFETY_NORMAL, preflight, set_payload, zero_ft)
@@ -47,9 +54,12 @@ from quest_teleop.utils.core import JOINT_NAMES, Limits, Mapping, TeleopCore, fk
 from quest_teleop.utils.gripper import STROKE_M, GripperWorker, URCapGripper
 from quest_teleop.utils import mount_check
 from quest_teleop.utils.policy_runner import AutoStop, GripperHysteresis, WrenchFilter, preprocess, pose_source, tilt_of, ContactCompliance, SpiralSearch, contact_descent
+from quest_teleop.utils.policy_runner import ForceModeGate, force_mode_override, force_mode_settings
 from scipy.spatial.transform import Rotation
 
 IMAGE_TOPIC = "/camera/camera/color/image_raw/compressed"
+FORCE_MODE_CONTROLLER = "force_mode_controller"
+FORCE_MODE_CALL_S = 1.0   # a start/stop_force_mode call slower than this pauses the run and is reported
 # Jaw gap guesses for a gripper_width policy input when the gripper reports nothing (--no-gripper):
 # in the demos the jaws read 17 mm closed on the clear piece and 84 mm open.
 GUESS_CLOSED_M, GUESS_OPEN_M = 0.017, 0.084
@@ -107,6 +117,16 @@ class PolicyNode(Node):
         self._open_since = None       # when the gripper last opened (the offset survives a brief flicker)
         self._push_z = None           # target height when pushing past --comp-push-limit began
         self._comp_state = ""
+        # UR force mode while placing (--force-mode). fm_want is what the gate asks for; _fm_pump sends
+        # it to the arm, one call at a time, and fm_active is what the arm confirmed.
+        self.fm_selection, self.fm_wrench = force_mode_settings(args.fm_axes, args.fm_push)
+        self.fm_gate = ForceModeGate(enter=args.fm_enter_mm / 1000, exit=args.fm_exit_mm / 1000,
+                                     lookahead=args.fm_lookahead_s, min_fz=args.fm_min_fz)
+        self.fm_live = args.live and args.force_mode == "on"
+        self.fm_want = self.fm_active = False
+        self.fm_busy = None           # (turning on?, sent at) while a call is in flight
+        self.fm_retry_at = 0.0
+        self.fm_start = None          # measured tool0 position when the arm confirmed force mode
         self.home_q = np.array(args.home_joints, dtype=float)
         self._resync = False
         self._recenter = False
@@ -138,6 +158,10 @@ class PolicyNode(Node):
         if args.live and not args.no_gripper:
             self.gripper = GripperWorker(URCapGripper(args.gripper_ip, sid=args.gripper_sid),
                                          args.gripper_speed, args.gripper_force, self.get_logger())
+        if self.fm_live:
+            calls = ReentrantCallbackGroup()   # answered while the control loop keeps running
+            self.fm_start_cli = self.create_client(SetForceMode, f"/{FORCE_MODE_CONTROLLER}/start_force_mode", callback_group=calls)
+            self.fm_stop_cli = self.create_client(Trigger, f"/{FORCE_MODE_CONTROLLER}/stop_force_mode", callback_group=calls)
         self.timer = self.create_timer(1.0 / args.rate, self._tick, callback_group=control)
         self._stop = threading.Event()
         self._thinker = threading.Thread(target=self._policy_loop, daemon=True)
@@ -350,6 +374,10 @@ class PolicyNode(Node):
         self._resync = True            # done by the control loop, which owns self.core
         self.comp.reset(keep_zero=bool(self.grip.closed))   # log while paused: re-zero unless holding
         self.search.reset()
+        if self.fm_gate.engaged and self.args.force_mode != "off":
+            self.get_logger().info(f"force mode OFF (run stopped){'' if self.fm_live else ' [not sent]'}")
+        self.fm_gate.reset()
+        self.fm_want = False           # _fm_pump (every tick, holds included) ends it on the arm
 
     # ---- the policy, at 10 Hz on its own thread
     def _policy_loop(self) -> None:
@@ -455,6 +483,7 @@ class PolicyNode(Node):
         if self._recenter:
             self._recenter = False
             self.core.box_center = self.core.target[:3, 3].copy()
+        self._fm_pump()
 
         if self.args.live:
             reason = self._gate(q_actual)
@@ -478,6 +507,7 @@ class PolicyNode(Node):
                 self.force_baseline = self.force.copy()
             desired, opening = chunk.at(time.monotonic())
             desired = self._comply(desired, q_actual, chunk)
+            desired = self._force_mode(desired, q_actual, chunk)
             q_cmd = self.core.follow(desired, 1.0 / self.args.rate)
             self.opening = float(opening)
             self.min_opening = self.opening if self.min_opening is None else min(self.min_opening, self.opening)
@@ -532,7 +562,7 @@ class PolicyNode(Node):
             self._push_z, self._comp_state = None, ""
             return desired
         measured = fk(q_actual)
-        if self.grip.closed:
+        if self.grip.closed and not self._fm_on():   # in force mode the arm itself gives way: no slide or search
             extra = None
             if self.args.search:
                 w = self.comp.w
@@ -553,6 +583,107 @@ class PolicyNode(Node):
             if self.search.state in ("found", "failed"):
                 self._comp_state = (self._comp_state + f" search-{self.search.state}").strip()
         return out
+
+    # ---- UR force mode while placing (--force-mode)
+    def _fm_on(self) -> bool:
+        """The arm is, or may be, in force mode (asked for, confirmed, or a call in flight)."""
+        return self.fm_live and (self.fm_want or self.fm_active or self.fm_busy is not None)
+
+    def _force_mode(self, desired: np.ndarray, q_actual: np.ndarray, chunk) -> np.ndarray:
+        """Enter force mode when holding the piece and the plan descends, leave when the gripper opens
+        or the plan lifts (ForceModeGate). While in it, command the measured pose along the compliant
+        axes (the arm ignores the command there). 'log' only reports the switches."""
+        if self.args.force_mode == "off":
+            return desired
+        if self.args.compliance == "off" and self.force is not None and self.torque is not None:
+            self.comp.filter(np.r_[self.force, self.torque], 1.0 / self.args.rate)   # zeroed F_z for --fm-min-fz
+        fz = self.comp.w[2] if self.comp.zero is not None else 0.0
+        now = time.monotonic()
+        changed = self.fm_gate.update(bool(self.grip.closed), self.fm_gate.planned_dz(chunk, now), fz)
+        if changed is not None:
+            self.get_logger().info(f"force mode {'ON' if changed else 'OFF'} ({self.fm_gate.reason})"
+                                   f"{'' if self.fm_live else ' [not sent: --force-mode log or dry run]'}")
+            self.fm_want = changed
+        if not self._fm_on():
+            return desired
+        measured = fk(q_actual)
+        if self.fm_start is not None:
+            moved = np.linalg.norm((measured[:3, 3] - self.fm_start)[self.fm_selection[:3]])
+            if moved > self.args.fm_max_mm / 1000:
+                self._pause(f"force mode moved the tool {moved * 1000:.1f} mm (--fm-max-mm {self.args.fm_max_mm:g})")
+                return desired
+        return force_mode_override(desired, measured, self.fm_selection)
+
+    def _fm_request(self) -> SetForceMode.Request:
+        a, req = self.args, SetForceMode.Request()
+        req.task_frame.header.frame_id = "base"   # the arm's base: x, y horizontal, z up
+        req.task_frame.pose.orientation.w = 1.0
+        (req.selection_vector_x, req.selection_vector_y, req.selection_vector_z,
+         req.selection_vector_rx, req.selection_vector_ry, req.selection_vector_rz) = (bool(v) for v in self.fm_selection)
+        w = self.fm_wrench
+        req.wrench.force.x, req.wrench.force.y, req.wrench.force.z = (float(v) for v in w[:3])
+        req.wrench.torque.x, req.wrench.torque.y, req.wrench.torque.z = (float(v) for v in w[3:])
+        req.type = SetForceMode.Request.NO_TRANSFORM
+        req.speed_limits.linear.x = req.speed_limits.linear.y = req.speed_limits.linear.z = float(a.fm_speed)
+        req.speed_limits.angular.x = req.speed_limits.angular.y = req.speed_limits.angular.z = float(a.fm_rot_speed)
+        req.damping_factor = float(a.fm_damping)
+        req.gain_scaling = float(a.fm_gain_scaling)
+        return req
+
+    def _fm_pump(self) -> None:
+        """Every tick (holds too): send the arm what fm_want says, one call at a time."""
+        if not self.fm_live:
+            return
+        now = time.monotonic()
+        if self.fm_busy is not None:
+            on, sent = self.fm_busy
+            if now - sent > FORCE_MODE_CALL_S and now >= self.fm_retry_at:
+                self.fm_retry_at = now + 1.0
+                self.get_logger().error(f"{'start' if on else 'stop'}_force_mode has not answered for {now - sent:.1f} s")
+                self._pause("force mode call not answered")
+            return
+        if self.fm_want == self.fm_active or now < self.fm_retry_at:
+            return
+        on = self.fm_want
+        fut = (self.fm_start_cli.call_async(self._fm_request()) if on
+               else self.fm_stop_cli.call_async(Trigger.Request()))
+        self.fm_busy = (on, now)
+        fut.add_done_callback(self._fm_done)
+
+    def _fm_done(self, fut) -> None:
+        on, sent = self.fm_busy
+        try:
+            ok = bool(fut.result().success)
+        except Exception as e:   # noqa: BLE001 - reported, and the pump retries
+            ok = False
+            self.get_logger().error(f"{'start' if on else 'stop'}_force_mode failed: {e}")
+        ms = (time.monotonic() - sent) * 1000
+        if ok:
+            if on:
+                with self.lock:
+                    q = self.q_actual
+                self.fm_start = fk(q)[:3, 3].copy()
+            else:
+                self.fm_start = None
+            self.fm_active = on
+            self.get_logger().info(f"arm {'in' if on else 'out of'} force mode ({ms:.0f} ms)")
+        else:
+            self.fm_retry_at = time.monotonic() + 0.5
+            if on:
+                self.get_logger().error(f"Could not start force mode ({ms:.0f} ms); is {FORCE_MODE_CONTROLLER} active?")
+                self._pause("could not start force mode")
+            else:
+                self.get_logger().error(f"Could not stop force mode ({ms:.0f} ms); retrying. Stop the program on the pendant if it persists.")
+        self.fm_busy = None
+
+    def stop_force_mode(self, executor, timeout: float = 2.0) -> None:
+        """On exit: end force mode on the arm, whatever this node thinks its state is."""
+        if not self.fm_live or not rclpy.ok():
+            return
+        fut = self.fm_stop_cli.call_async(Trigger.Request())
+        executor.spin_until_future_complete(fut, timeout_sec=timeout)
+        ok = fut.done() and fut.result() is not None and fut.result().success
+        print("Force mode stopped." if ok else "Could NOT confirm force mode stopped: stop the program on the pendant.", flush=True)
 
     # ---- outputs
     def _status(self, status: str) -> None:
@@ -579,6 +710,15 @@ class PolicyNode(Node):
                               f" planned={pdeg:.1f}deg lean=({plean[0]:+.2f},{plean[1]:+.2f})")
                 if self.args.compliance != "off" and self.grip.closed:
                     extra += self._comp_text()
+                if self.args.force_mode != "off" and (self.grip.closed or self.fm_gate.engaged):
+                    extra += f" fm[{self.args.force_mode}]={'ON' if self.fm_gate.engaged else 'off'}"
+                    if self.fm_live:
+                        extra += f" arm={'in' if self.fm_active else 'out'}{' (call pending)' if self.fm_busy else ''}"
+                    if self.fm_start is not None:
+                        with self.lock:
+                            q = self.q_actual
+                        d = (fk(q)[:3, 3] - self.fm_start) * 1000
+                        extra += f" fm_moved=({d[0]:+.1f},{d[1]:+.1f},{d[2]:+.1f})mm"
                 if self.plan_side is not None:
                     extra += f" side={self.plan_side:.1f}mm"
                 if self.opening is not None:
@@ -642,6 +782,30 @@ class PolicyNode(Node):
         self._stop.set()
 
 
+def force_mode_preflight(node: PolicyNode, timeout: float = 5.0) -> str | None:
+    """--force-mode on: force_mode_controller must be active (the driver loads it inactive) and its
+    services reachable. Like preflight, this never switches controllers."""
+    lc = node.create_client(ListControllers, "/controller_manager/list_controllers")
+    if not lc.wait_for_service(timeout_sec=timeout):
+        return "controller_manager is not reachable"
+    fut = lc.call_async(ListControllers.Request())
+    rclpy.spin_until_future_complete(node, fut, timeout_sec=timeout)
+    if not fut.done():
+        return "list_controllers timed out"
+    state = {c.name: c.state for c in fut.result().controller}.get(FORCE_MODE_CONTROLLER, "missing")
+    if state != "active":
+        return (f"{FORCE_MODE_CONTROLLER} is {state}. Activate it (it runs alongside forward_position_controller): "
+                f"docker compose run --rm ros ros2 control switch_controllers --activate {FORCE_MODE_CONTROLLER}")
+    for cli in (node.fm_start_cli, node.fm_stop_cli):
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return f"{cli.srv_name} is not reachable"
+    selected = ",".join(a for a, s in zip(("x", "y", "z", "rx", "ry", "rz"), node.fm_selection) if s)
+    node.get_logger().info(f"Force mode ready: compliant in {selected} (base frame)"
+                           + (f", pushing {node.args.fm_push:g} N down" if node.fm_selection[2] else "")
+                           + f", up to {node.args.fm_speed * 1000:.0f} mm/s")
+    return None
+
+
 def keyboard(node: PolicyNode, stop: threading.Event) -> None:
     """Enter toggles the run; B returns to the start pose. Single keys on a terminal (main() puts it in
     cbreak mode), else whole lines ("b" + Enter). Polls stdin so Ctrl-C still reaches the main thread."""
@@ -666,8 +830,8 @@ def parse_args(argv=None):
     p.add_argument("--device", default=None, help="torch device (default: cuda if available)")
     p.add_argument("--live", action="store_true", help="Actually command the arm and gripper")
     p.add_argument("--no-ft-zero", action="store_true")
-    p.add_argument("--payload-mass", type=float, default=0.925)
-    p.add_argument("--payload-cog", type=float, nargs=3, default=[0.0, 0.0, 0.058], metavar=("X", "Y", "Z"))
+    p.add_argument("--payload-mass", type=float, default=1.080)
+    p.add_argument("--payload-cog", type=float, nargs=3, default=[-0.009, -0.009, 0.066], metavar=("X", "Y", "Z"))
     p.add_argument("--rate", type=float, default=125.0)
     p.add_argument("--max-run-s", type=float, default=60.0, help="A run pauses by itself after this long (s)")
     p.add_argument("--auto-stop-s", type=float, default=2.0,
@@ -721,6 +885,26 @@ def parse_args(argv=None):
     p.add_argument("--comp-descent-mm-s", type=float, default=2.0, help="fastest descent while touching (mm/s)")
     p.add_argument("--comp-keep-s", type=float, default=1.0,
                    help="s the gripper may open (policy flicker) before the sideways offset is dropped")
+    p.add_argument("--force-mode", choices=("off", "log", "on"), default="off",
+                   help="UR force mode while placing: entered when the gripper holds the piece and the plan descends, "
+                        "left when it opens or the plan lifts. 'on' (with --live) needs force_mode_controller active; "
+                        "'log' only reports when it would switch")
+    p.add_argument("--fm-axes", default="x,y",
+                   help="compliant axes in the base frame, some of x,y,z,rx,ry,rz. x,y: slides along contact, "
+                        "follows the plan in z. With z: pushes down with --fm-push instead of following the plan's height")
+    p.add_argument("--fm-push", type=float, default=5.0, help="N pushed down when z is compliant")
+    p.add_argument("--fm-speed", type=float, default=0.02, help="m/s: fastest motion along compliant axes")
+    p.add_argument("--fm-rot-speed", type=float, default=0.1, help="rad/s: fastest motion about compliant axes")
+    p.add_argument("--fm-damping", type=float, default=0.025, help="UR force mode damping, 0-1 (1 stops quickly when the force goes)")
+    p.add_argument("--fm-gain-scaling", type=float, default=0.5, help="UR force mode gain scaling, 0-2 (over 1 can be unstable on hard contact)")
+    p.add_argument("--fm-enter-mm", type=float, default=1.0, help="enter when the plan goes down more than this over --fm-lookahead-s")
+    p.add_argument("--fm-exit-mm", type=float, default=1.0, help="leave when the plan goes up more than this over --fm-lookahead-s")
+    p.add_argument("--fm-lookahead-s", type=float, default=0.3, help="s of the plan looked at to tell descending from lifting")
+    p.add_argument("--fm-min-fz", type=float, default=3.0,
+                   help="N: also require this much (zeroed) push along tool z before entering, so the plan can still "
+                        "steer sideways in free air; 0 enters on descent alone")
+    p.add_argument("--fm-max-mm", type=float, default=8.0,
+                   help="mm the tool may move along compliant axes in one stretch of force mode before the run pauses")
     p.add_argument("--home-joints", type=float, nargs=6, default=list(DEMO_START_Q), metavar="Q",
                    help="Joints (rad) that B returns to between runs; default: median start of the clear-piece demos")
     p.add_argument("--home-speed", type=float, default=0.3, help="rad/s of the fastest joint when returning to start")
@@ -766,11 +950,17 @@ def main(argv=None) -> int:
              if "gripper_width" in runner.state_keys and (args.no_gripper or not args.live) else ""),
           flush=True)
 
-    rclpy.init()
+    if args.force_mode == "on" and args.live:
+        # Ctrl-C as a plain KeyboardInterrupt, so ROS is still up to take the arm out of force mode.
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.SIGTERM)
+    else:
+        rclpy.init()
     node = PolicyNode(args, runner)
     node.timer.cancel()
     if args.live:
         error = (preflight(node)
+                 or (force_mode_preflight(node) if args.force_mode == "on" else None)
                  or (None if args.payload_mass <= 0 else set_payload(node, args.payload_mass, args.payload_cog))
                  or (None if args.no_ft_zero else zero_ft(node)))
         if error:
@@ -800,6 +990,7 @@ def main(argv=None) -> int:
         if term is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, term)
         node.stop_thinking()
+        node.stop_force_mode(executor)
         runner.close()
         if node.gripper is not None:
             node.gripper.stop()

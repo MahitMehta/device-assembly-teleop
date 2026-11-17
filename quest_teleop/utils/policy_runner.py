@@ -267,6 +267,74 @@ def contact_descent(desired_z: float, target_z: float, fz: float, min_fz: float,
     return desired_z, None, ""
 
 
+FORCE_MODE_AXES = ("x", "y", "z", "rx", "ry", "rz")
+
+
+def force_mode_settings(axes: str, push: float) -> tuple[list[bool], list[float]]:
+    """--fm-axes ("x,y", "x,y,z", ...) and --fm-push (N) -> UR force_mode selection vector and wrench,
+    in the base frame. Compliant axes get zero force (follow whatever pushes), except z, which pushes
+    down with `push` N (the wrench is what the robot applies to its surroundings: down = -z)."""
+    names = [a.strip().lower() for a in axes.split(",") if a.strip()]
+    bad = [a for a in names if a not in FORCE_MODE_AXES]
+    if bad or not names:
+        raise ValueError(f"force mode axes must be some of {','.join(FORCE_MODE_AXES)}, got {axes!r}")
+    selection = [a in names for a in FORCE_MODE_AXES]
+    wrench = [0.0] * 6
+    if selection[2]:
+        wrench[2] = -abs(push)
+    return selection, wrench
+
+
+def force_mode_override(desired: np.ndarray, measured: np.ndarray, selection: list[bool]) -> np.ndarray:
+    """While in force mode the arm ignores the commanded pose along compliant axes, so command the
+    measured pose there: the command stays on the arm (no tracking-error hold) and nothing jumps when
+    force mode ends. Rotations come from the measured pose if any rotational axis is compliant."""
+    out = desired.copy()
+    for i in range(3):
+        if selection[i]:
+            out[i, 3] = measured[i, 3]
+    if any(selection[3:]):
+        out[:3, :3] = measured[:3, :3]
+    return out
+
+
+class ForceModeGate:
+    """When to be in UR force mode: holding the piece (gripper closed) and the plan going down.
+      - Enters when the plan's target `lookahead` s ahead is more than `enter` m below the current one
+        (and, with min_fz > 0, the piece is already touching: |F_z| over it).
+      - Leaves at once when the gripper opens (releasing in force mode would push on the fingers), or
+        when the plan rises more than `exit` m over the lookahead (lifting out).
+      - Between the two (holding still), it stays as it is."""
+
+    def __init__(self, enter: float = 0.001, exit: float = 0.001, lookahead: float = 0.3, min_fz: float = 0.0):
+        self.enter, self.exit, self.lookahead, self.min_fz = enter, exit, lookahead, min_fz
+        self.reset()
+
+    def reset(self) -> None:
+        self.engaged = False
+        self.reason = ""
+
+    def planned_dz(self, chunk: "Chunk", now: float) -> float:
+        """How far the plan goes up (+) or down (-) over the next `lookahead` s (m)."""
+        return float(chunk.at(now + self.lookahead)[0][2, 3] - chunk.at(now)[0][2, 3])
+
+    def update(self, closed: bool, dz: float, fz: float = 0.0) -> bool | None:
+        """Returns the new state when it changes, else None; `reason` says why."""
+        if self.engaged:
+            if not closed:
+                return self._set(False, "gripper opened")
+            if dz > self.exit:
+                return self._set(False, f"plan lifting {dz * 1000:.1f} mm")
+            return None
+        if closed and dz < -self.enter and abs(fz) >= self.min_fz:
+            return self._set(True, f"holding, plan descending {-dz * 1000:.1f} mm")
+        return None
+
+    def _set(self, on: bool, reason: str) -> bool:
+        self.engaged, self.reason = on, reason
+        return on
+
+
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
     doesn't flicker the gripper. None until the policy first asks to close: commanding open at

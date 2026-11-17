@@ -258,6 +258,22 @@ may run at a time.
    front-left, where the piece needed to go. Signs come from a
    press test on the arm (2026-11-16). `log` only prints it, and also reports while paused in robot
    terms (`push fwd/left/up`, `slide`, `slid`), for repeating that test.
+   `--force-mode log|on` (off by default) uses the arm's own UR force mode for placing instead: once
+   the gripper holds the piece and the plan goes down (more than `--fm-enter-mm` 1 over the next
+   `--fm-lookahead-s` 0.3 s) and the piece is touching (over `--fm-min-fz` 3 N along tool z, zeroed at the run start; 0 enters on descent alone, giving up sideways steering in free air), the arm gives way to contact
+   along `--fm-axes` (base frame, default `x,y`: it slides wherever the chamfer or wall pushes it,
+   up to `--fm-speed` 0.02 m/s, while z follows the plan). With `z` among the axes it pushes down
+   with `--fm-push` 5 N instead of following the plan's height. It leaves force mode at once when
+   the gripper opens, when the plan rises more than `--fm-exit-mm` 1, and whenever the run stops
+   (pause, any hold, Ctrl-C). While in it, the node commands the measured pose along the
+   compliant axes, so there is no tracking-error hold and no jump on leaving, and the `--compliance`
+   slide and spiral search pause (its slow descent and push limit still apply to a non-compliant z).
+   If force mode moves the tool more than `--fm-max-mm` 8, the run pauses. `log` (or a dry run) only
+   reports when it would switch. `on` needs `force_mode_controller`, which the driver loads inactive;
+   activate it next to `forward_position_controller` once per driver start:
+   `docker compose run --rm ros ros2 control switch_controllers --activate force_mode_controller`.
+   Force mode subtracts the payload's weight, so keep `PAYLOAD_*` in `.env` current (measured on
+   the pendant 2026-11-17: 1.080 kg at (-9, -9, 66) mm); a wrong payload shows up as drift.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
    ```bash
    docker compose run --rm policy /policies/real_v1 --live

@@ -405,9 +405,9 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--live", action="store_true", help="Actually command the arm and gripper")
     p.add_argument("--no-ft-zero", action="store_true", help="Don't zero the force/torque sensor when going live")
-    # Robotiq's spec for the 2F-85 with its UR coupling: 925 g, centre of mass 58 mm out along the flange's z.
-    p.add_argument("--payload-mass", type=float, default=0.925, help="Payload set on the arm when going live (kg); 0 leaves it unchanged")
-    p.add_argument("--payload-cog", type=float, nargs=3, default=[0.0, 0.0, 0.058], metavar=("X", "Y", "Z"), help="Payload centre of gravity from the flange (m)")
+    # Measured on the pendant (2026-11-17): gripper, coupling, camera mount and RealSense.
+    p.add_argument("--payload-mass", type=float, default=1.080, help="Payload set on the arm when going live (kg); 0 leaves it unchanged")
+    p.add_argument("--payload-cog", type=float, nargs=3, default=[-0.009, -0.009, 0.066], metavar=("X", "Y", "Z"), help="Payload centre of gravity from the flange (m)")
     p.add_argument("--fake-source", action="store_true", help="Scripted motion instead of a Quest")
     p.add_argument("--fake-amplitude", type=float, default=0.03)
     p.add_argument("--fake-jog", action="store_true", help="Scripted source uses the stick and buttons instead of the grip")

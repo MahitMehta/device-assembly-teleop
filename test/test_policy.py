@@ -329,3 +329,74 @@ def test_dataset_nominal_fk_matches_the_robot_nodes():
     batch = geometry.ur5e_fk(qs)
     for q, T in zip(qs, batch):
         assert np.allclose(T, fk(q), atol=1e-12)
+
+
+def _descending_chunk(dz_per_step, t0=0.0, dt=0.1, n=16, z0=0.3):
+    from quest_teleop.utils.policy_runner import Chunk
+    poses = np.repeat(np.eye(4)[None], n, axis=0)
+    poses[:, 2, 3] = z0 + dz_per_step * np.arange(n)
+    return Chunk(t0=t0, dt=dt, poses=poses, grip=np.zeros(n))
+
+
+def test_force_mode_settings_select_axes_and_push_down():
+    from quest_teleop.utils.policy_runner import force_mode_settings
+    sel, w = force_mode_settings("x,y", 5.0)
+    assert sel == [True, True, False, False, False, False] and w == [0.0] * 6
+    sel, w = force_mode_settings(" X, y ,z", 5.0)
+    assert sel[:3] == [True, True, True] and w[2] == -5.0     # pushes down on the part
+    with pytest.raises(ValueError):
+        force_mode_settings("x,w", 5.0)
+    with pytest.raises(ValueError):
+        force_mode_settings("", 5.0)
+
+
+def test_force_mode_override_commands_the_measured_pose_on_compliant_axes():
+    from quest_teleop.utils.policy_runner import force_mode_override
+    desired, measured = np.eye(4), np.eye(4)
+    desired[:3, 3] = [0.1, 0.2, 0.3]
+    measured[:3, 3] = [0.11, 0.19, 0.25]
+    measured[:3, :3] = matrix_from_rotvec(np.array([0.0, 0.05, 0.0]))
+    out = force_mode_override(desired, measured, [True, True, False, False, False, False])
+    assert np.allclose(out[:3, 3], [0.11, 0.19, 0.3]) and np.allclose(out[:3, :3], np.eye(3))
+    out = force_mode_override(desired, measured, [True, True, True, True, True, False])
+    assert np.allclose(out[:3, 3], measured[:3, 3]) and np.allclose(out[:3, :3], measured[:3, :3])
+    assert np.allclose(desired[:3, 3], [0.1, 0.2, 0.3])        # not changed in place
+
+
+def test_force_mode_gate_enters_holding_and_descending_only():
+    from quest_teleop.utils.policy_runner import ForceModeGate
+    g = ForceModeGate(enter=0.001, exit=0.001, lookahead=0.3)
+    down = _descending_chunk(-0.002)                            # 6 mm down over 0.3 s
+    assert abs(g.planned_dz(down, 0.0) + 0.006) < 1e-9
+    assert g.update(False, g.planned_dz(down, 0.0)) is None     # descending, but not holding
+    assert g.update(True, 0.0) is None                          # holding, still
+    assert g.update(True, -0.0005) is None                      # holding, barely moving
+    assert g.update(True, g.planned_dz(down, 0.0)) is True and g.engaged
+    assert g.update(True, 0.0) is None and g.engaged            # pausing on the rim keeps it
+    assert g.update(True, -0.004) is None and g.engaged
+
+
+def test_force_mode_gate_leaves_on_release_or_lift():
+    from quest_teleop.utils.policy_runner import ForceModeGate
+    g = ForceModeGate()
+    g.update(True, -0.005)
+    assert g.update(False, 0.0) is False and "opened" in g.reason
+    g.update(True, -0.005)
+    assert g.update(True, g.planned_dz(_descending_chunk(+0.002), 0.0)) is False and "lifting" in g.reason
+    g.update(True, -0.005)
+    g.reset()
+    assert not g.engaged
+
+
+def test_force_mode_gate_can_wait_for_contact():
+    from quest_teleop.utils.policy_runner import ForceModeGate
+    g = ForceModeGate(min_fz=3.0)
+    assert g.update(True, -0.005, fz=1.0) is None               # descending in free air
+    assert g.update(True, -0.005, fz=-4.0) is True              # touching (either sign)
+
+
+def test_force_mode_gate_near_the_end_of_a_chunk_holds_the_last_target():
+    from quest_teleop.utils.policy_runner import ForceModeGate
+    g = ForceModeGate(lookahead=0.3)
+    c = _descending_chunk(-0.002)
+    assert abs(g.planned_dz(c, c.end())) < 1e-12               # held at the end: no motion, no switch

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the UR driver, for testing on an isolated ROS domain. Never use domain 66.
 
-Usage: fake_robot.py [--controller-state active|inactive] [--inject safety|stall|force]
+Usage: fake_robot.py [--controller-state active|inactive] [--force-mode-state active|inactive] [--inject safety|stall|force]
 Follows commands, then prints a JSON report when stopped by --duration.
 """
 import argparse
@@ -13,7 +13,7 @@ import rclpy
 from controller_manager_msgs.msg import ControllerState
 from controller_manager_msgs.srv import ListControllers
 from std_srvs.srv import Trigger
-from ur_msgs.srv import SetPayload
+from ur_msgs.srv import SetForceMode, SetPayload
 from geometry_msgs.msg import WrenchStamped
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -27,6 +27,7 @@ KIN = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_join
 
 a = argparse.ArgumentParser()
 a.add_argument("--controller-state", default="active")
+a.add_argument("--force-mode-state", default="active")
 a.add_argument("--inject", default="none")
 a.add_argument("--inject-at", type=float, default=4.0)
 a.add_argument("--duration", type=float, default=10.0)
@@ -53,13 +54,32 @@ def on_cmd(m):
 
 def list_cb(req, res):
     res.controller = [ControllerState(name="forward_position_controller", state=args.controller_state),
-                      ControllerState(name="scaled_joint_trajectory_controller", state="inactive")]
+                      ControllerState(name="scaled_joint_trajectory_controller", state="inactive"),
+                      ControllerState(name="force_mode_controller", state=args.force_mode_state)]
     return res
 
 
 n.create_service(ListControllers, "/controller_manager/list_controllers", list_cb)
 n.create_service(SetPayload, "/io_and_status_controller/set_payload", lambda req, res: (setattr(res, "success", True), res)[1])
 n.create_service(Trigger, "/io_and_status_controller/zero_ftsensor", lambda req, res: (setattr(res, "success", True), res)[1])
+force_mode_calls = []
+
+
+def start_fm(req, res):
+    force_mode_calls.append({"start": [req.selection_vector_x, req.selection_vector_y, req.selection_vector_z],
+                             "push_z": req.wrench.force.z, "frame": req.task_frame.header.frame_id})
+    res.success = True
+    return res
+
+
+def stop_fm(req, res):
+    force_mode_calls.append("stop")
+    res.success = True
+    return res
+
+
+n.create_service(SetForceMode, "/force_mode_controller/start_force_mode", start_fm)
+n.create_service(Trigger, "/force_mode_controller/stop_force_mode", stop_fm)
 n.create_subscription(Float64MultiArray, "/forward_position_controller/commands", on_cmd, 1)
 n.create_subscription(String, "/teleop/status", lambda m: statuses.append(m.data), 10)
 n.create_subscription(Bool, "/teleop/engaged", lambda m: engaged.append(m.data), 10)
@@ -105,4 +125,5 @@ print(json.dumps({
     "motion_after_inject_rad": float(np.abs(np.array(cmds_after) - cmds_after[0]).max()) if cmds_after else 0.0,
     "statuses": sorted(set(statuses)),
     "engaged_seen": sorted(set(engaged)),
+    "force_mode_calls": force_mode_calls,
 }))
