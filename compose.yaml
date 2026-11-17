@@ -2,6 +2,7 @@
 # Settings (IPs, ROS domain, payload) come from .env: cp .example.env .env
 # Our own UR driver on our own ROS domain (67), independent of anything else on the arm.
 #   docker compose run --rm driver                  # UR driver, starts in forward_position_controller
+#   docker compose run --rm driver --force-mode     # same, with force_mode_controller active (policy --force-mode on)
 #   docker compose run --rm teleop                  # second shell: dry-run (sends nothing)
 #   docker compose run --rm teleop --live           # extra args go to teleop_node
 #   docker compose run --rm record <task_name>      # third shell, while live
@@ -37,7 +38,8 @@ services:
     <<: *ros
     # Headless: the driver sends its program to the arm itself (pendant in Remote Control),
     # so the pendant's installation is untouched. Only one driver can control the arm.
-    entrypoint: [scripts/ros.sh, ros2, launch, ur_robot_driver, ur_control.launch.py,
+    # Extra args go to the launch file; --force-mode also activates force_mode_controller (scripts/driver.sh).
+    entrypoint: [scripts/ros.sh, scripts/driver.sh,
                  ur_type:=ur5e, "robot_ip:=${ROBOT_IP:?}", "reverse_ip:=${REVERSE_IP:?}",
                  headless_mode:=true, launch_rviz:=false,
                  initial_joint_controller:=forward_position_controller]

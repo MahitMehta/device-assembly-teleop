@@ -83,6 +83,7 @@ git pull                # after each push from the Mac
    put the pendant in **Remote Control** mode; the pendant's installation is not changed. 
    ```bash
    docker compose run --rm driver
+   docker compose run --rm driver --force-mode   # also activates force_mode_controller, for policy --force-mode on
    ```
 2. **Dry-run** (second shell; sends nothing to the arm or gripper). Hold grip, push your hand away
    from the headset, and check the logged offsets move in the robot's forward direction.
@@ -270,8 +271,9 @@ may run at a time.
    slide and spiral search pause (its slow descent and push limit still apply to a non-compliant z).
    If force mode moves the tool more than `--fm-max-mm` 8, the run pauses. `log` (or a dry run) only
    reports when it would switch. `on` needs `force_mode_controller`, which the driver loads inactive;
-   activate it next to `forward_position_controller` once per driver start:
-   `docker compose run --rm ros ros2 control switch_controllers --activate force_mode_controller`.
+   start the driver with `docker compose run --rm driver --force-mode`, which activates it next to
+   `forward_position_controller` (it prints `force_mode_controller active`). On a driver already
+   running: `docker compose run --rm ros python3 scripts/activate_controller.py force_mode_controller`.
    Force mode subtracts the payload's weight, so keep `PAYLOAD_*` in `.env` current (measured on
    the pendant 2026-11-17: 1.080 kg at (-9, -9, 66) mm); a wrong payload shows up as drift.
 5. **Live**, with someone at the e-stop and reduced speed on the pendant:
