@@ -917,7 +917,7 @@ def parse_args(argv=None):
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
-    p.add_argument("--grip-min-closed-s", type=float, default=0.25,
+    p.add_argument("--grip-min-closed-s", type=float, default=0.5,
                    help="once closed, the gripper stays closed at least this long (s), even if the policy's "
                         "predicted opening jumps straight back (e.g. to 85 mm)")
     p.add_argument("--gripper-ip", default="10.168.4.251")
