@@ -292,8 +292,9 @@ history; every 8 frames it plans 16 tool0 targets relative to the measured pose 
 on its own thread, while the arm keeps following the previous plan's later targets. The 125 Hz
 control loop interpolates between targets and moves through the same speed, box, floor and joint
 limits as teleop. The predicted gripper opening closes the gripper below 30 mm and opens it above
-55 mm (`--grip-close-below`, `--grip-open-above`); like teleop it never sends "open" before the
-first close.
+55 mm (`--grip-close-below`, `--grip-open-above`), and once closed it stays closed for at least
+`--grip-min-closed-s` 0.25 s even if the prediction jumps straight back open; like teleop it never
+sends "open" before the first close.
 
 Defaults are deliberately conservative: 0.10 m/s and 0.5 rad/s, a +/-35 cm box around the pose each
 run starts from (`--box-half-extent`; the demos moved up to 30 cm); the log names the face it hit,

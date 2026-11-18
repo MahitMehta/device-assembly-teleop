@@ -49,6 +49,17 @@ def test_gripper_hysteresis():
     assert g.update(0.04) is None           # stays open in the dead band
 
 
+def test_gripper_stays_closed_for_the_minimum_time():
+    g = GripperHysteresis(close_below=0.03, open_above=0.055, min_closed_s=0.25)
+    assert g.update(0.02, now=10.0) is True     # close
+    assert g.update(0.085, now=10.10) is None   # policy jumps back open: held closed
+    assert g.update(0.085, now=10.24) is None
+    assert g.update(0.085, now=10.26) is False  # 0.25 s up: opens
+    assert g.update(0.02, now=11.0) is True     # each close starts its own hold
+    assert g.update(0.085, now=11.2) is None
+    assert g.update(0.02, now=11.21) is None    # still closed, no change
+
+
 def test_follow_reaches_a_target_within_speed_limits():
     lim = Limits(max_linear_speed=0.1, max_angular_speed=0.5, max_joint_speed=1.0, box_half_extent=0.4)
     c = TeleopCore(HOME, Mapping(), lim)

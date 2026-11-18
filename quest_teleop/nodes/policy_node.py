@@ -133,7 +133,7 @@ class PolicyNode(Node):
         self.home_q = np.array(args.home_joints, dtype=float)
         self._resync = False
         self._recenter = False
-        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above)
+        self.grip = GripperHysteresis(args.grip_close_below, args.grip_open_above, args.grip_min_closed_s)
         self.auto_stop = AutoStop(args.auto_stop_s, args.auto_stop_mm)
         self.last_log = 0.0
         self.mapping = Mapping(tcp_offset=np.eye(4))   # targets are tool0 poses, as in training
@@ -515,7 +515,7 @@ class PolicyNode(Node):
             self.opening = float(opening)
             self.min_opening = self.opening if self.min_opening is None else min(self.min_opening, self.opening)
             self.opening_pub.publish(Float64(data=self.opening))
-            changed = self.grip.update(opening)
+            changed = self.grip.update(opening, time.monotonic())
             if changed is not None:
                 self.get_logger().info(f"gripper -> {'close' if changed else 'open'} (policy opening {opening * 1000:.0f} mm)")
                 self.grip_cmd_pub.publish(Float64(data=0.0 if changed else STROKE_M))
@@ -917,6 +917,9 @@ def parse_args(argv=None):
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
+    p.add_argument("--grip-min-closed-s", type=float, default=0.25,
+                   help="once closed, the gripper stays closed at least this long (s), even if the policy's "
+                        "predicted opening jumps straight back (e.g. to 85 mm)")
     p.add_argument("--gripper-ip", default="10.168.4.251")
     p.add_argument("--gripper-sid", type=int, default=3)
     p.add_argument("--gripper-speed", type=int, default=50)

@@ -338,16 +338,20 @@ class ForceModeGate:
 class GripperHysteresis:
     """Commanded opening (m) -> closed/open, with a dead band so a prediction near the middle
     doesn't flicker the gripper. None until the policy first asks to close: commanding open at
-    startup would drop anything held (as in teleop)."""
+    startup would drop anything held (as in teleop). Once closed it stays closed for at least
+    `min_closed_s`, even if the prediction jumps straight back open, so a one-plan blip still grips."""
 
-    def __init__(self, close_below: float = 0.030, open_above: float = 0.055):
-        self.close_below, self.open_above = close_below, open_above
+    def __init__(self, close_below: float = 0.030, open_above: float = 0.055, min_closed_s: float = 0.0):
+        self.close_below, self.open_above, self.min_closed_s = close_below, open_above, min_closed_s
         self.closed: bool | None = None
+        self.closed_at: float | None = None
 
-    def update(self, opening: float) -> bool | None:
-        """Returns the new state when it changes, else None."""
+    def update(self, opening: float, now: float | None = None) -> bool | None:
+        """Returns the new state when it changes, else None. `now` (s, monotonic) times the hold."""
         if self.closed:
             want = opening < self.open_above
+            if not want and now is not None and self.closed_at is not None and now - self.closed_at < self.min_closed_s:
+                return None   # too soon after closing: hold
         else:
             want = opening < self.close_below
         if self.closed is None and not want:
@@ -355,6 +359,7 @@ class GripperHysteresis:
         if want == self.closed:
             return None
         self.closed = want
+        self.closed_at = now if want else None
         return want
 
 
