@@ -411,3 +411,49 @@ def test_force_mode_gate_near_the_end_of_a_chunk_holds_the_last_target():
     g = ForceModeGate(lookahead=0.3)
     c = _descending_chunk(-0.002)
     assert abs(g.planned_dz(c, c.end())) < 1e-12               # held at the end: no motion, no switch
+
+
+def _finger_scene(angle_deg, background, centre=(100.0, 175.0), turn_about=(128.0, 96.0)):
+    """A dark, slightly tapered finger near the bottom edge on a given background, the whole image
+    turned by angle_deg (CCW, OpenCV's sense) about turn_about."""
+    h, w = 192, 256
+    y, x = np.mgrid[0:h, 0:w].astype(float)
+    a = np.radians(angle_deg)
+    cx, cy = turn_about
+    # undo the turn: where each pixel was in the unturned scene
+    dx, dy = x - cx, y - cy
+    ux, uy = cx + np.cos(a) * dx - np.sin(a) * dy, cy + np.sin(a) * dx + np.cos(a) * dy
+    lx, ly = ux - centre[0], uy - centre[1]
+    t = np.radians(-77.0)                       # finger axis, as in the demos
+    along = lx * np.cos(t) + ly * np.sin(t)
+    across = -lx * np.sin(t) + ly * np.cos(t)
+    finger = (np.abs(along) < 30) & (np.abs(across) < 5 + 0.08 * (along + 30))
+    img = background.copy()
+    img[finger] = 25.0
+    return img, finger
+
+
+def test_mount_template_measures_turns_on_other_backgrounds():
+    from quest_teleop.utils import mount_check as mc
+    rng = np.random.default_rng(1)
+    plain = np.full((192, 256), 105.0) + rng.normal(0, 2, (192, 256))
+    ref_img, ref_finger = _finger_scene(0.0, plain)
+    tpl = mc.make_template(ref_img, ref_finger)
+    dark_mat = np.full((192, 256), 70.0) + rng.normal(0, 6, (192, 256))
+    fixture = plain.copy()
+    fixture[:, 120:] = 200.0                                     # something bright next to the finger
+    for bg in (dark_mat, fixture):
+        for turn in (-2.5, 0.0, 1.5, 3.0):
+            img, _ = _finger_scene(turn, bg)
+            m = mc.match(img, tpl)
+            assert abs(m.angle - turn) < 0.6 and m.score > mc.MIN_SCORE, (turn, m)   # hard-edged synthetic finger; real frames: < 0.35
+
+
+def test_mount_template_reports_no_finger():
+    from quest_teleop.utils import mount_check as mc
+    rng = np.random.default_rng(2)
+    plain = np.full((192, 256), 105.0) + rng.normal(0, 2, (192, 256))
+    ref_img, ref_finger = _finger_scene(0.0, plain)
+    tpl = mc.make_template(ref_img, ref_finger)
+    m = mc.match(np.full((192, 256), 100.0) + rng.normal(0, 8, (192, 256)), tpl)
+    assert m.score < mc.MIN_SCORE

@@ -1,11 +1,13 @@
 {
   "finger_xy": [
-    100.28,
-    172.73
+    100.31,
+    172.7
   ],
-  "finger_angle_deg": -76.84,
-  "finger_area": 619,
-  "spread_deg": 0.28,
+  "finger_angle_deg": -76.99,
+  "finger_area": 606,
+  "template": "wrist_mount_finger.npz",
+  "template_pixels": 570,
+  "spread_deg": 0.872,
   "episodes": 45,
-  "source": "clear_piece_v2 (45 demos, 2026-11-13/14), first open-gripper frames"
+  "source": "/ds"
 }
