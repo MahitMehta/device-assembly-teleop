@@ -10,7 +10,7 @@ UR force mode (force_mode_controller, activate it first) and gives way to contac
 it leaves force mode when the gripper opens, the plan lifts, or the run stops for any reason.
 
 Enter starts a run, Enter again pauses it (the arm holds where it is), B (while paused, live only)
-moves the arm back to the demos' start pose (--home-joints), Ctrl-C quits. Each run
+moves the arm back to the home pose (--home-joints), Ctrl-C quits. Each run
 starts the policy fresh (no frames from before the pause). A run pauses by itself after
 --max-run-s, on any hold, and when the task looks done (--auto-stop-s: the gripper has closed and
 reopened, and the policy has planned almost no motion since).
@@ -66,6 +66,9 @@ GUESS_CLOSED_M, GUESS_OPEN_M = 0.017, 0.084
 # Median joints (rad) at the start of the 45 clear-piece demos (/data/teleop_demos/clear-piece): tool
 # straight down, TCP ~35 cm above the base. Per joint the demos spread 4-7 deg (wrist 3: 16 deg).
 DEMO_START_Q = (3.496, -1.307, -2.135, -1.305, 1.571, 0.247)
+# Where B returns to (2026-11-18): the arm's pose then, flange at (-0.089, 0.423, 0.410) m in base,
+# with the 4.0 deg tilt the driver measured taken out, so the driver's tool0 z points straight down.
+HOME_Q = (2.0926, -1.3938, -1.9324, -1.3872, 1.5768, 0.4831)
 
 
 class PolicyNode(Node):
@@ -251,7 +254,7 @@ class PolicyNode(Node):
             self.get_logger().info(f"[{'LIVE' if self.args.live else 'DRY-RUN'}] run started (Enter pauses)")
 
     def home(self) -> None:
-        """B: between runs, move the arm back to --home-joints (the demos' start pose). B again stops."""
+        """B: between runs, move the arm back to --home-joints (the home pose). B again stops."""
         log = self.get_logger()
         if self.homing:
             self.homing = False
@@ -905,8 +908,9 @@ def parse_args(argv=None):
                         "steer sideways in free air; 0 enters on descent alone")
     p.add_argument("--fm-max-mm", type=float, default=8.0,
                    help="mm the tool may move along compliant axes in one stretch of force mode before the run pauses")
-    p.add_argument("--home-joints", type=float, nargs=6, default=list(DEMO_START_Q), metavar="Q",
-                   help="Joints (rad) that B returns to between runs; default: median start of the clear-piece demos")
+    p.add_argument("--home-joints", type=float, nargs=6, default=list(HOME_Q), metavar="Q",
+                   help="Joints (rad) that B returns to between runs; default: HOME_Q, tool straight down. "
+                        f"The clear-piece demos' median start: {' '.join(map(str, DEMO_START_Q))}")
     p.add_argument("--home-speed", type=float, default=0.3, help="rad/s of the fastest joint when returning to start")
     p.add_argument("--home-max-move", type=float, default=1.5,
                    help="rad; B refuses if any joint would turn more than this (e.g. the pan wrapped the other way)")

@@ -235,8 +235,8 @@ may run at a time.
    ```
    It loads the policy and runs one warm-up plan, then waits. **Enter** starts a run, Enter again
    pauses it (the arm holds), Ctrl-C quits. Each run starts the policy fresh. Between runs (live
-   only), **B** moves the arm back to where the demos started (`--home-joints`, by default the
-   median start of the 45 clear-piece demos) at `--home-speed` (0.3 rad/s), all joints arriving
+   only), **B** moves the arm back to the home pose (`--home-joints`, by default `HOME_Q`: the
+   pose set on 2026-11-18, tool straight down; the demos' median start is `DEMO_START_Q`) at `--home-speed` (0.3 rad/s), all joints arriving
    together; B again stops it. It refuses if a joint would turn more than `--home-max-move`
    (1.5 rad), and stops on any hold or if the path would go below the floor. The gripper is left
    as it is. The status line shows `tilt=` (measured) and `planned=` (the most tilted pose the
