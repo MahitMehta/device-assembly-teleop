@@ -913,7 +913,7 @@ def parse_args(argv=None):
     p.add_argument("--gripper-length", type=float, default=0.18)
     p.add_argument("--grip-close-below", type=float, default=0.030, help="Predicted opening (m) that closes the gripper")
     p.add_argument("--grip-open-above", type=float, default=0.055, help="...and that opens it again")
-    p.add_argument("--gripper-ip", default="10.168.4.208")
+    p.add_argument("--gripper-ip", default="10.168.4.251")
     p.add_argument("--gripper-sid", type=int, default=3)
     p.add_argument("--gripper-speed", type=int, default=50)
     p.add_argument("--gripper-force", type=int, default=0)

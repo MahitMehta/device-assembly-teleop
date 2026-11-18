@@ -49,6 +49,7 @@ services:
     <<: *ros
     entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.teleop_node,
                  --udp-bind, "${CORAL_IP:?}", --udp-from, "${SENDER_IP:?}",
+                 --gripper-ip, "${ROBOT_IP:?}",   # the Robotiq URCap socket is on the UR controller
                  --payload-mass, "${PAYLOAD_MASS:?}",
                  --payload-cog, "${PAYLOAD_COG_X:?}", "${PAYLOAD_COG_Y:?}", "${PAYLOAD_COG_Z:?}"]
     command: []
@@ -101,6 +102,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${POLICY_GPU:-0}    # .env: which of coral's GPUs (shared: check nvidia-smi)
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     entrypoint: [scripts/ros.sh, python3, -m, quest_teleop.nodes.policy_node,
+                 --gripper-ip, "${ROBOT_IP:?}",   # the Robotiq URCap socket is on the UR controller
                  --payload-mass, "${PAYLOAD_MASS:?}",
                  --payload-cog, "${PAYLOAD_COG_X:?}", "${PAYLOAD_COG_Y:?}", "${PAYLOAD_COG_Z:?}"]
     command: []

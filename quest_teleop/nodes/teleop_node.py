@@ -431,7 +431,7 @@ def parse_args(argv=None):
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.01, help="Floor in the base frame (m), 1 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")
     p.add_argument("--gripper-length", type=float, default=0.18, help="Flange to fingertips (m), for the floor check; Robotiq puts the 2F-85's pad centre at 174 mm with its coupling")
-    p.add_argument("--gripper-ip", default="10.168.4.208", help="UR controller running the Robotiq URCap (socket port 63352)")
+    p.add_argument("--gripper-ip", default="10.168.4.251", help="UR controller running the Robotiq URCap (socket port 63352)")
     p.add_argument("--gripper-sid", type=int, default=3, help="Gripper ID on the URCap socket ('GET SID' lists them)")
     p.add_argument("--gripper-speed", type=int, default=50, help="Robotiq speed register, 0 (slowest) to 255; does not change grip force")
     p.add_argument("--gripper-force", type=int, default=0, help="Robotiq force register, 0 (Low Force mode, Secure Grip off) to 255")
