@@ -5,8 +5,8 @@ Dry-run is the default: it computes motion but sends nothing to the arm or gripp
 This node never switches controllers. Activate forward_position_controller yourself.
 
 Controls (right controller): hold grip = move, trigger = gripper,
-and with the grip released: stick up/down = forward/back along the way the gripper faces, stick left/right = level
-along the tool's x axis, A/B = fine in/out along the tool's z axis. Left controller: stick left/right = turn the
+and with the grip released: stick up/down = forward/back along the robot's forward, stick left/right = level
+to its right (--jog-frame gripper: along the gripper's heading and x axis), A/B = fine in/out along the tool's z axis. Left controller: stick left/right = turn the
 gripper about vertical (right = clockwise from above).
 Click the stick to toggle tool-down mode: the gripper turns to point straight down and stays
 that way; twisting your hand still turns it about vertical. Any hold turns the mode off.
@@ -428,10 +428,10 @@ def parse_args(argv=None):
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N, measured; the reading at rest varies with pose, so compare with the log")
     p.add_argument("--tool-down", action="store_true", help="Start in tool-down mode (stick click toggles it)")
     p.add_argument("--jog-speed", type=float, default=0.01, help="Right stick speed at full deflection, forward/back and sideways (m/s); A/B run at half of this")
-    p.add_argument("--jog-frame", choices=("gripper", "robot"), default="gripper",
-                   help="Right stick forward/back and left/right: 'gripper' follows the way the gripper faces "
-                        "(turns with the wrist); 'robot' follows --robot-forward-yaw-deg and its right, "
-                        "whichever way the gripper is turned")
+    p.add_argument("--jog-frame", choices=("gripper", "robot"), default="robot",
+                   help="Right stick forward/back and left/right: 'robot' (default) follows --robot-forward-yaw-deg "
+                        "and its right, whichever way the gripper is turned; 'gripper' follows the way the gripper "
+                        "faces (turns with the wrist)")
     p.add_argument("--jog-yaw-speed", type=float, default=0.5, help="Left stick turning speed at full deflection (rad/s)")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.01, help="Floor in the base frame (m), 1 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")
