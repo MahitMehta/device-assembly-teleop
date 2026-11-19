@@ -530,3 +530,17 @@ def test_turning_tool_down_lifts_to_keep_the_fingertips_clear():
     run(c, [pose()] * int(6 / DT), clutch=False)
     assert _tool_z(c) @ DOWN > 0.999
     assert _lowest_gripper_point(c) > floor - 3e-3
+
+
+def test_jog_flip_reverses_the_stick():
+    from quest_teleop.utils.core import Mapping, TeleopCore, fk
+    q0 = np.array([2.0926, -1.3938, -1.9324, -1.3872, 1.5768, 0.4831])
+    moved = []
+    for flip in (False, True):
+        c = TeleopCore(q0, Mapping(jog_flip=flip))
+        start = c.target[:3, 3].copy()
+        for _ in range(50):
+            c.jog(np.array([0.01, 0.0, 0.0, 0.005]), 0.008)
+        moved.append(c.target[:3, 3] - start)
+    assert np.linalg.norm(moved[0]) > 1e-3
+    assert np.allclose(moved[1], -moved[0], atol=1e-5)

@@ -203,6 +203,9 @@ class Mapping:
     position_scale: float = 0.5
     rotation_scale: float = 1.0
     tcp_offset: np.ndarray = field(default_factory=lambda: np.eye(4))
+    # Stick forward/back and left/right reversed: for when the gripper faces the operator (the stick
+    # follows the gripper's heading, which a setup can turn round).
+    jog_flip: bool = False
 
 
 class TeleopCore:
@@ -319,6 +322,8 @@ class TeleopCore:
         self._last_ctrl = None
         self.status = "jogging"
         forward, yaw_rate, inout, sideways = (float(v) for v in command)
+        if self.map.jog_flip:
+            forward, sideways = -forward, -sideways
         out = self.target.copy()
         R = out[:3, :3]
         ahead, side = heading(R), heading(R, axis=0)
