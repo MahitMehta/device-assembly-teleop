@@ -43,6 +43,11 @@ train:
   grad_clip: 1.0
   ema_decay: 0.999
   color_jitter: [0.3, 0.3, 0.3]   # brightness, contrast, saturation
+  # Camera white balance and hue drift between sessions (auto white balance swung the mat's G/R by
+  # 10% on 2026-11-18). Red and blue gains vary by +/- white_balance_jitter (WB 3400 -> 3700 K moved
+  # G/R by 0.14), hues turn by up to +/- hue_jitter_deg. 0 turns either off.
+  white_balance_jitter: 0.15
+  hue_jitter_deg: 5.0
   state_noise_std: 0.02  # on the normalized state: ~0.9 mm of width, ~1 deg of orientation
   # The camera mount clamps round the wrist and may sit a few degrees round from where the demos
   # were recorded (re-mounting). That rotates the image about where the tool axis meets the work

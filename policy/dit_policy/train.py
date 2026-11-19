@@ -56,16 +56,34 @@ def sample_actions(model: DiTPolicy, sched: DDIMScheduler, images: torch.Tensor,
 
 
 class ColorJitter:
-    """Per-sample brightness/contrast/saturation jitter on GPU (uint8 in, uint8 out). The real
-    camera's exposure and white balance drifted between sessions, so this matters."""
+    """Per-sample colour jitter on GPU (uint8 in, uint8 out), for camera exposure and white balance
+    that drift between sessions (on 2026-11-18 auto white balance turned the mat from slightly magenta
+    to slightly green, a 10% swing in G/R, which brightness/contrast/saturation alone never show).
+      - white balance: red and blue gains relative to green, each in 1 +/- wb (what the camera's own
+        white balance changes);
+      - hue: the colours turned by up to +/- hue_deg about the grey axis (YIQ rotation, keeps luma);
+      - then brightness, contrast and saturation, each by a factor in 1 +/- b, c, s."""
 
-    def __init__(self, b: float, c: float, s: float):
-        self.b, self.c, self.s = b, c, s
+    def __init__(self, b: float, c: float, s: float, hue_deg: float = 0.0, wb: float = 0.0):
+        self.b, self.c, self.s, self.hue_deg, self.wb = b, c, s, hue_deg, wb
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
-        f = x.float() / 255.0
+        f = x.float() / 255.0                                    # (B, T, 3, H, W)
+        u = lambda: torch.rand(B, 1, 1, 1, device=x.device) * 2 - 1
         r = lambda a: (1 + (torch.rand(B, 1, 1, 1, 1, device=x.device) * 2 - 1) * a)
+        if self.wb:
+            f = torch.cat([f[:, :, 0:1] * (1 + u()[:, None] * self.wb), f[:, :, 1:2],
+                           f[:, :, 2:3] * (1 + u()[:, None] * self.wb)], dim=2)
+        if self.hue_deg:
+            th = torch.deg2rad(u().view(B) * self.hue_deg)
+            cos, sin = torch.cos(th), torch.sin(th)
+            y = 0.299 * f[:, :, 0] + 0.587 * f[:, :, 1] + 0.114 * f[:, :, 2]
+            i = 0.596 * f[:, :, 0] - 0.274 * f[:, :, 1] - 0.322 * f[:, :, 2]
+            q = 0.211 * f[:, :, 0] - 0.523 * f[:, :, 1] + 0.312 * f[:, :, 2]
+            cos, sin = cos.view(B, 1, 1, 1), sin.view(B, 1, 1, 1)
+            i, q = i * cos - q * sin, i * sin + q * cos
+            f = torch.stack([y + 0.956 * i + 0.621 * q, y - 0.272 * i - 0.647 * q, y - 1.106 * i + 1.703 * q], dim=2)
         f = f * r(self.b)
         mean = f.mean(dim=(1, 2, 3, 4), keepdim=True)
         f = (f - mean) * r(self.c) + mean
@@ -135,7 +153,7 @@ def main() -> None:
     lr_at = lambda s: min(1.0, (s + 1) / tc["warmup_steps"]) * 0.5 * (1 + math.cos(math.pi * min(s / tc["steps"], 1.0)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
     ddpm, ddim = make_schedulers(cfg)
-    jitter = ColorJitter(*tc["color_jitter"])
+    jitter = ColorJitter(*tc["color_jitter"], hue_deg=tc.get("hue_jitter_deg", 0.0), wb=tc.get("white_balance_jitter", 0.0))
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model {n_params / 1e6:.1f} M params on {dev}")
 
