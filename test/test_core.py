@@ -532,15 +532,20 @@ def test_turning_tool_down_lifts_to_keep_the_fingertips_clear():
     assert _lowest_gripper_point(c) > floor - 3e-3
 
 
-def test_jog_flip_reverses_the_stick():
-    from quest_teleop.utils.core import Mapping, TeleopCore, fk
-    q0 = np.array([2.0926, -1.3938, -1.9324, -1.3872, 1.5768, 0.4831])
-    moved = []
-    for flip in (False, True):
-        c = TeleopCore(q0, Mapping(jog_flip=flip))
+
+def test_jog_frame_robot_ignores_the_wrist_yaw():
+    from quest_teleop.utils.core import Mapping, TeleopCore
+    home = np.array([2.0926, -1.3938, -1.9324, -1.3872, 1.5768, 0.4831])
+    turned = home.copy(); turned[5] += 1.0                      # wrist 3 turned ~57 deg
+    def moved(q0, frame, cmd):
+        c = TeleopCore(q0, Mapping(robot_forward_yaw=np.pi, jog_frame=frame))
         start = c.target[:3, 3].copy()
-        for _ in range(50):
-            c.jog(np.array([0.01, 0.0, 0.0, 0.005]), 0.008)
-        moved.append(c.target[:3, 3] - start)
-    assert np.linalg.norm(moved[0]) > 1e-3
-    assert np.allclose(moved[1], -moved[0], atol=1e-5)
+        for _ in range(60):
+            c.jog(np.array(cmd), 0.008)
+        d = c.target[:3, 3] - start
+        return d / np.linalg.norm(d)
+    fwd, right = [0.01, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.01]
+    for q0 in (home, turned):
+        assert np.allclose(moved(q0, "robot", fwd), [-1, 0, 0], atol=0.02)   # robot forward: base -x
+        assert np.allclose(moved(q0, "robot", right), [0, 1, 0], atol=0.02)  # its right, seen from above
+    assert not np.allclose(moved(home, "gripper", fwd), moved(turned, "gripper", fwd), atol=0.1)  # turns with the wrist

@@ -108,7 +108,7 @@ class TeleopNode(Node):
             position_scale=args.position_scale,
             rotation_scale=args.rotation_scale,
             tcp_offset=_z_offset(args.tcp_z),
-            jog_flip=args.jog_flip,
+            jog_frame=args.jog_frame,
         )
         self.limits = Limits(
             max_linear_speed=args.max_linear_speed,
@@ -428,9 +428,10 @@ def parse_args(argv=None):
     p.add_argument("--max-force-abs", type=float, default=60.0, help="N, measured; the reading at rest varies with pose, so compare with the log")
     p.add_argument("--tool-down", action="store_true", help="Start in tool-down mode (stick click toggles it)")
     p.add_argument("--jog-speed", type=float, default=0.01, help="Right stick speed at full deflection, forward/back and sideways (m/s); A/B run at half of this")
-    p.add_argument("--jog-flip", action="store_true",
-                   help="Reverse the right stick (forward/back and left/right): it drives along the gripper's own "
-                        "heading, so use this when the gripper faces you")
+    p.add_argument("--jog-frame", choices=("gripper", "robot"), default="gripper",
+                   help="Right stick forward/back and left/right: 'gripper' follows the way the gripper faces "
+                        "(turns with the wrist); 'robot' follows --robot-forward-yaw-deg and its right, "
+                        "whichever way the gripper is turned")
     p.add_argument("--jog-yaw-speed", type=float, default=0.5, help="Left stick turning speed at full deflection (rad/s)")
     p.add_argument("--box-half-extent", type=float, default=0.40, help="Metres the TCP may move from its startup position, per axis")
     p.add_argument("--min-z", type=float, default=0.01, help="Floor in the base frame (m), 1 cm above the arm's base by default: no part of the gripper, elbow or wrist goes below it")

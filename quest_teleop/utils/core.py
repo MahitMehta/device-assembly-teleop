@@ -203,9 +203,10 @@ class Mapping:
     position_scale: float = 0.5
     rotation_scale: float = 1.0
     tcp_offset: np.ndarray = field(default_factory=lambda: np.eye(4))
-    # Stick forward/back and left/right reversed: for when the gripper faces the operator (the stick
-    # follows the gripper's heading, which a setup can turn round).
-    jog_flip: bool = False
+    # What the right stick's forward/back and left/right follow: "gripper" (its heading, tool +y and
+    # +x flattened, so they turn with the wrist) or "robot" (robot_forward_yaw and its right, fixed
+    # however the gripper is turned).
+    jog_frame: str = "gripper"
 
 
 class TeleopCore:
@@ -312,7 +313,8 @@ class TeleopCore:
     def jog(self, command: np.ndarray, dt: float) -> np.ndarray:
         """Fine motion from jog_velocity's (forward, yaw rate, in/out, sideways).
 
-        Forward runs level along the gripper's heading, sideways level along its x axis, yaw
+        Forward runs level along the gripper's heading, sideways level along its x axis (or, with
+        Mapping.jog_frame "robot", along the robot's forward and right), yaw
         turns it about vertical through the TCP, and in/out runs along the tool's z axis.
         Same limits as hand motion.
         """
@@ -322,11 +324,13 @@ class TeleopCore:
         self._last_ctrl = None
         self.status = "jogging"
         forward, yaw_rate, inout, sideways = (float(v) for v in command)
-        if self.map.jog_flip:
-            forward, sideways = -forward, -sideways
         out = self.target.copy()
         R = out[:3, :3]
-        ahead, side = heading(R), heading(R, axis=0)
+        if self.map.jog_frame == "robot":
+            c, s = np.cos(self.map.robot_forward_yaw), np.sin(self.map.robot_forward_yaw)
+            ahead, side = np.array([c, s, 0.0]), np.array([s, -c, 0.0])   # forward, and its right
+        else:
+            ahead, side = heading(R), heading(R, axis=0)
         if ahead is None and forward:
             forward = 0.0
             self.status = "no heading: gripper facing up or down along tool y"
